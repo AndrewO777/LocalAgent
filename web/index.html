@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LocalAgent</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel-2: #1c2128;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --yellow: #d29922;
+        --red: #f85149;
+        --purple: #bc8cff;
+      }
+      * { box-sizing: border-box; }
+      html, body, #root { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        font-size: 14px;
+      }
+      .app { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
+      .sidebar { background: var(--panel); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; }
+      .sidebar h1 { font-size: 18px; margin: 0 0 4px 0; }
+      .sidebar .sub { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+      .field { display: flex; flex-direction: column; margin-bottom: 14px; }
+      .field label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+      .field input, .field textarea, .field select {
+        background: var(--panel-2);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font: inherit;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 13px;
+      }
+      .field textarea { resize: vertical; min-height: 80px; }
+      .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--accent); }
+      .row { display: flex; gap: 8px; }
+      .row .field { flex: 1; }
+      .btn {
+        background: var(--accent);
+        color: #0d1117;
+        border: 0;
+        border-radius: 6px;
+        padding: 10px 14px;
+        font-weight: 600;
+        cursor: pointer;
+        width: 100%;
+        font-size: 14px;
+      }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .btn.danger { background: var(--red); color: white; }
+      .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+      .main { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+      .header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+      .header .status { font-size: 12px; padding: 3px 8px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); }
+      .header .status.running { color: var(--yellow); border-color: var(--yellow); }
+      .header .status.done { color: var(--green); border-color: var(--green); }
+      .header .status.error { color: var(--red); border-color: var(--red); }
+      .events { flex: 1; overflow-y: auto; padding: 16px 20px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55; }
+      .event { padding: 6px 0; border-bottom: 1px dashed transparent; }
+      .event.iteration { color: var(--accent); font-weight: 700; padding-top: 14px; padding-bottom: 4px; border-top: 1px solid var(--border); margin-top: 10px; }
+      .event.iteration:first-child { border-top: 0; margin-top: 0; }
+      .event.started { color: var(--muted); }
+      .event.model_text { color: var(--fg); white-space: pre-wrap; }
+      .event.tool_call { color: var(--yellow); }
+      .event.tool_call .name { color: var(--purple); font-weight: 600; }
+      .event.tool_result { color: var(--muted); white-space: pre-wrap; padding-left: 16px; border-left: 2px solid var(--border); }
+      .event.tool_result.error { color: var(--red); border-left-color: var(--red); }
+      .event.done { color: var(--green); font-weight: 700; padding-top: 14px; }
+      .event.done.error { color: var(--red); }
+      .event.done.canceled, .event.done.max_iter { color: var(--yellow); }
+      .empty { color: var(--muted); text-align: center; margin-top: 40px; font-family: inherit; }
+      details.args { margin-top: 2px; }
+      details.args summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+      details.args pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; }
+      .pill { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); font-size: 11px; color: var(--muted); margin-left: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="text/babel" data-presets="react">
+      const { useState, useEffect, useRef, useCallback } = React;
+
+      function App() {
+        const [form, setForm] = useState(() => ({
+          model: localStorage.getItem("oa.model") || "qwen2.5-coder:7b",
+          host: localStorage.getItem("oa.host") || "",
+          workdir: localStorage.getItem("oa.workdir") || ".",
+          goal: "",
+          max_iterations: Number(localStorage.getItem("oa.maxIter") || 25),
+        }));
+        const [sessionId, setSessionId] = useState(null);
+        const [events, setEvents] = useState([]);
+        const [status, setStatus] = useState("idle"); // idle | running | done | error
+        const [doneReason, setDoneReason] = useState(null);
+        const [submitError, setSubmitError] = useState(null);
+        const esRef = useRef(null);
+        const eventsEndRef = useRef(null);
+
+        useEffect(() => {
+          localStorage.setItem("oa.model", form.model);
+          localStorage.setItem("oa.host", form.host);
+          localStorage.setItem("oa.workdir", form.workdir);
+          localStorage.setItem("oa.maxIter", String(form.max_iterations));
+        }, [form.model, form.host, form.workdir, form.max_iterations]);
+
+        useEffect(() => {
+          // Auto-scroll to bottom as events stream in.
+          if (eventsEndRef.current) {
+            eventsEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+          }
+        }, [events.length]);
+
+        // Cleanup EventSource on unmount.
+        useEffect(() => () => { if (esRef.current) esRef.current.close(); }, []);
+
+        const connect = useCallback((id) => {
+          if (esRef.current) esRef.current.close();
+          const es = new EventSource(`/api/sessions/${id}/events`);
+          esRef.current = es;
+          const handle = (raw) => {
+            try {
+              const ev = JSON.parse(raw.data);
+              setEvents((prev) => [...prev, ev]);
+              if (ev.type === "done") {
+                setStatus(ev.reason === "finished" ? "done" : "error");
+                setDoneReason(ev.reason);
+                es.close();
+                esRef.current = null;
+              }
+            } catch (_) {}
+          };
+          ["started", "iteration", "model_text", "tool_call", "tool_result", "error", "done"].forEach((t) => {
+            es.addEventListener(t, handle);
+          });
+          es.onerror = () => {
+            // EventSource will auto-reconnect; if the session is already done,
+            // close it ourselves to avoid noisy reconnect attempts.
+          };
+        }, []);
+
+        const onSubmit = async (e) => {
+          e.preventDefault();
+          setSubmitError(null);
+          setEvents([]);
+          setDoneReason(null);
+          setStatus("running");
+          try {
+            const r = await fetch("/api/run", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: form.model,
+                host: form.host,
+                workdir: form.workdir,
+                goal: form.goal,
+                max_iterations: Number(form.max_iterations) || 25,
+              }),
+            });
+            const body = await r.json();
+            if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+            setSessionId(body.session_id);
+            connect(body.session_id);
+          } catch (err) {
+            setStatus("error");
+            setSubmitError(String(err.message || err));
+          }
+        };
+
+        const onCancel = async () => {
+          if (!sessionId) return;
+          await fetch(`/api/sessions/${sessionId}/cancel`, { method: "POST" });
+        };
+
+        const headerStatus = (() => {
+          if (status === "running") return <span className="status running">running</span>;
+          if (status === "done") return <span className="status done">finished</span>;
+          if (status === "error") return <span className="status error">{doneReason || "error"}</span>;
+          return <span className="status">idle</span>;
+        })();
+
+        return (
+          <div className="app">
+            <aside className="sidebar">
+              <h1>LocalAgent</h1>
+              <div className="sub">Agentic loop · litellm + langchaingo · Ollama</div>
+              <form onSubmit={onSubmit}>
+                <div className="field">
+                  <label>Model</label>
+                  <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}
+                         placeholder="qwen2.5-coder:7b" />
+                </div>
+                <div className="field">
+                  <label>Ollama host</label>
+                  <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })}
+                         placeholder="http://localhost:11434" />
+                </div>
+                <div className="field">
+                  <label>Project directory</label>
+                  <input value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })}
+                         placeholder="C:\path\to\project" />
+                </div>
+                <div className="field">
+                  <label>Goal</label>
+                  <textarea value={form.goal} onChange={(e) => setForm({ ...form, goal: e.target.value })}
+                            placeholder="Add a /healthz endpoint and a test for it" required />
+                </div>
+                <div className="field">
+                  <label>Max iterations</label>
+                  <input type="number" min="1" max="200" value={form.max_iterations}
+                         onChange={(e) => setForm({ ...form, max_iterations: e.target.value })} />
+                </div>
+                {submitError && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{submitError}</div>}
+                {status === "running" ? (
+                  <button type="button" className="btn danger" onClick={onCancel}>Cancel run</button>
+                ) : (
+                  <button type="submit" className="btn" disabled={!form.goal.trim()}>Run agent</button>
+                )}
+              </form>
+            </aside>
+
+            <main className="main">
+              <div className="header">
+                <strong>Session</strong>
+                {sessionId ? <code style={{ color: "var(--muted)" }}>{sessionId}</code> : <span style={{ color: "var(--muted)" }}>—</span>}
+                {headerStatus}
+              </div>
+              <div className="events">
+                {events.length === 0 ? (
+                  <div className="empty">Configure on the left, then click <em>Run agent</em>. Tool calls and model output will stream here.</div>
+                ) : (
+                  events.map((e, i) => <EventRow key={i} ev={e} />)
+                )}
+                <div ref={eventsEndRef} />
+              </div>
+            </main>
+          </div>
+        );
+      }
+
+      function EventRow({ ev }) {
+        switch (ev.type) {
+          case "started":
+            return <div className="event started">▶ goal: {ev.text}</div>;
+          case "iteration":
+            return <div className="event iteration">── iteration {ev.iter} ──</div>;
+          case "model_text":
+            return <div className="event model_text">{ev.text}</div>;
+          case "tool_call":
+            return (
+              <div className="event tool_call">
+                → <span className="name">{ev.tool}</span>
+                <details className="args">
+                  <summary>{prettyArgs(ev.arguments)}</summary>
+                  <pre>{ev.arguments}</pre>
+                </details>
+              </div>
+            );
+          case "tool_result":
+            return (
+              <div className={"event tool_result" + (ev.is_error ? " error" : "")}>
+                {ev.result}
+              </div>
+            );
+          case "done":
+            return (
+              <div className={"event done " + (ev.reason || "")}>
+                {ev.reason === "finished" && "✓ finished"}
+                {ev.reason === "max_iter" && "⚠ reached max iterations"}
+                {ev.reason === "canceled" && "⚠ canceled"}
+                {ev.reason === "error" && `✗ error: ${ev.text || "unknown"}`}
+                {ev.summary && <span className="pill">{ev.summary}</span>}
+              </div>
+            );
+          default:
+            return null;
+        }
+      }
+
+      function prettyArgs(s) {
+        if (!s) return "(no arguments)";
+        try {
+          const obj = JSON.parse(s);
+          const compact = JSON.stringify(obj);
+          return compact.length > 120 ? compact.slice(0, 120) + "…" : compact;
+        } catch (_) {
+          return s.length > 120 ? s.slice(0, 120) + "…" : s;
+        }
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
