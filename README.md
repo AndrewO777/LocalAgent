@@ -85,7 +85,7 @@ The model gets six tools, all sandboxed to the workdir:
 | `read_file(path)` | Read a UTF-8 file (capped at 200 KB). |
 | `write_file(path, content)` | Create or overwrite a file. |
 | `edit_file(path, old_text, new_text)` | Unique-match string replace. |
-| `run_command(command)` | Run a shell command. PowerShell on Windows, `/bin/sh -c` elsewhere. 2-minute timeout, 32 KB output cap, cwd locked to workdir. |
+| `run_command(command, timeout_sec?)` | Run a shell command. PowerShell on Windows, `/bin/sh -c` elsewhere. 120 s default timeout (max 600 s), 32 KB output cap, cwd locked to workdir. Spawned in its own process group; on timeout/cancel the entire **process tree** is killed (`taskkill /F /T` on Windows, `kill -- -pgid` on Unix). Not suitable for long-running dev servers — the model is told to avoid them. |
 | `finish(summary)` | Signal task complete. |
 
 Sandboxing rules: absolute paths and `..` escapes are rejected at the tool
@@ -95,15 +95,38 @@ boundary.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/run` | Start a session. Body: `{model, host, workdir, goal, max_iterations}` → `{session_id}`. |
-| `GET`  | `/api/sessions` | List all sessions. |
-| `GET`  | `/api/sessions/{id}` | Summary for one session. |
-| `GET`  | `/api/sessions/{id}/events` | **SSE stream.** Replays full history, then tails live. 15 s heartbeats. |
-| `POST` | `/api/sessions/{id}/cancel` | Cancel a running session. |
-| `GET`  | `/` | Embedded React UI. |
+| `POST`   | `/api/run` | Start a session. Body: `{model, host, workdir, goal, max_iterations}` → `{session_id}`. |
+| `GET`    | `/api/sessions` | List all sessions (in-memory + persisted), newest first. |
+| `GET`    | `/api/sessions/{id}` | Summary + full event history for one session. |
+| `DELETE` | `/api/sessions/{id}` | Cancel (if running) and permanently remove a session from memory + disk. |
+| `GET`    | `/api/sessions/{id}/events` | **SSE stream.** Replays full history, then tails live. 15 s heartbeats. |
+| `POST`   | `/api/sessions/{id}/cancel` | Cancel a running session. |
+| `POST`   | `/api/sessions/{id}/continue` | Run more iterations on a finished session with a follow-up instruction. Body: `{goal, max_iterations, host?}`. Reuses the session's model + workdir + LLM conversation. |
+| `GET`    | `/` | Embedded React UI. |
 
 CORS is wide-open (`*`), so you can run a separate Vite/Next dev server against
 the same API during UI development.
+
+## Sessions
+
+Every run becomes a **session** identified by an 8-byte hex ID. The server
+persists the full event history of each finished session to disk as a single
+JSON file, atomically (`tmp` + rename). The UI sidebar shows all sessions
+newest-first with a status dot, and a `×` button deletes a session (both
+in-memory state and the on-disk file).
+
+| Knob | Default |
+|---|---|
+| Data directory | `~/.localagent/sessions/` (override with `-data-dir`) |
+| Format | one `<id>.json` per session, pretty-printed |
+| When written | on terminal event (`finished` / `error` / `canceled` / `max_iter`) |
+| In-progress runs | held in memory only; lost if the server crashes mid-run |
+
+To inspect a session by hand:
+
+```
+cat ~/.localagent/sessions/<id>.json | jq
+```
 
 ## Project layout
 
@@ -133,6 +156,10 @@ the same API during UI development.
   behaviour; the agent will retry with a relative path.
 - **UI shows `error` immediately after Start** — check the server log; usually
   workdir doesn't exist or the Ollama host is unreachable.
+- **`ollama stalled: no chunks in 60s`** — Ollama still has the model loaded
+  but stopped generating. Restart Ollama (`ollama serve` again) and retry.
+  The agent uses streaming with a 60 s idle watchdog, so these stalls now
+  surface as errors instead of hanging.
 
 ## Notes
 

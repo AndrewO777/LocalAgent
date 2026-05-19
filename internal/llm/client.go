@@ -1,7 +1,10 @@
 package llm
 
 import (
+	"net"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/voocel/litellm"
 )
@@ -15,6 +18,18 @@ type Client struct {
 // New constructs a litellm Ollama client pointed at host. host may be a bare
 // origin (http://localhost:11434) or the full OpenAI-compatible base URL — the
 // "/v1" suffix is added automatically.
+//
+// HTTP transport:
+//   - DisableKeepAlives so a stale connection (after machine sleep or an
+//     Ollama restart) can't cause silent hangs.
+//   - 5s dial timeout so DNS/network failures surface fast.
+//   - 30s response-header timeout.
+//
+// Resilience:
+//   - StreamIdleTimeout=60s — if Ollama goes quiet mid-stream, the watchdog
+//     cancels the request ctx and Stream.Next() returns ErrStreamIdle.
+//   - RequestTimeout=0 — rely on ctx + watchdog, never the blanket http.Client
+//     timeout (which would cut off legitimately slow generations).
 func New(model, host string) (*Client, error) {
 	if host == "" {
 		host = "http://localhost:11434"
@@ -23,9 +38,25 @@ func New(model, host string) (*Client, error) {
 	if !strings.HasSuffix(host, "/v1") {
 		host += "/v1"
 	}
+
+	hc := &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			DisableKeepAlives:     true,
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+	res := litellm.DefaultResilienceConfig()
+	res.StreamIdleTimeout = 60 * time.Second
+	res.RequestTimeout = 0
+
 	c, err := litellm.NewWithProvider("ollama", litellm.ProviderConfig{
-		BaseURL: host,
-		APIKey:  "ollama",
+		BaseURL:    host,
+		APIKey:     "ollama",
+		HTTPClient: hc,
+		Resilience: res,
 	})
 	if err != nil {
 		return nil, err

@@ -30,9 +30,9 @@
         font-size: 14px;
       }
       .app { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
-      .sidebar { background: var(--panel); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; }
+      .sidebar { background: var(--panel); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
       .sidebar h1 { font-size: 18px; margin: 0 0 4px 0; }
-      .sidebar .sub { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+      .sidebar .sub { color: var(--muted); font-size: 12px; }
       .field { display: flex; flex-direction: column; margin-bottom: 14px; }
       .field label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
       .field input, .field textarea, .field select {
@@ -47,8 +47,6 @@
       }
       .field textarea { resize: vertical; min-height: 80px; }
       .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--accent); }
-      .row { display: flex; gap: 8px; }
-      .row .field { flex: 1; }
       .btn {
         background: var(--accent);
         color: #0d1117;
@@ -62,13 +60,51 @@
       }
       .btn:disabled { opacity: 0.5; cursor: not-allowed; }
       .btn.danger { background: var(--red); color: white; }
-      .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+      .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); padding: 7px 10px; font-size: 12px; font-weight: 500; }
+
+      .sessions-header { display: flex; align-items: center; justify-content: space-between; }
+      .sessions-header h2 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0; }
+      .sessions { display: flex; flex-direction: column; gap: 4px; }
+      .session-item {
+        display: grid; grid-template-columns: 1fr auto; gap: 4px; align-items: center;
+        background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+        padding: 8px 10px; cursor: pointer; transition: border-color 0.1s;
+      }
+      .session-item:hover { border-color: var(--accent); }
+      .session-item.active { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+      .session-item .goal {
+        font-size: 13px; color: var(--fg); overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; max-width: 220px;
+      }
+      .session-item .meta { font-size: 11px; color: var(--muted); display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+      .session-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+      .session-item .dot.running { background: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
+      .session-item .dot.finished { background: var(--green); }
+      .session-item .dot.error, .session-item .dot.canceled, .session-item .dot.max_iter { background: var(--red); }
+      .session-item .delete {
+        background: transparent; border: 0; color: var(--muted); cursor: pointer; padding: 4px 6px;
+        font-size: 16px; line-height: 1; border-radius: 4px;
+      }
+      .session-item .delete:hover { background: var(--red); color: white; }
+      .sessions-empty { color: var(--muted); font-size: 12px; font-style: italic; padding: 4px 0; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+      .continue-banner {
+        background: rgba(88,166,255,0.08); border: 1px solid var(--accent); border-radius: 6px;
+        padding: 10px 12px; margin-bottom: 14px;
+      }
+      .continue-banner-title { font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.04em; }
+      .continue-banner-meta { font-size: 12px; color: var(--muted); margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
       .main { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-      .header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+      .header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .header .title { font-weight: 600; color: var(--fg); }
+      .header .meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
       .header .status { font-size: 12px; padding: 3px 8px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); }
       .header .status.running { color: var(--yellow); border-color: var(--yellow); }
-      .header .status.done { color: var(--green); border-color: var(--green); }
-      .header .status.error { color: var(--red); border-color: var(--red); }
+      .header .status.finished { color: var(--green); border-color: var(--green); }
+      .header .status.error, .header .status.canceled, .header .status.max_iter { color: var(--red); border-color: var(--red); }
+      .header .spacer { flex: 1; }
       .events { flex: 1; overflow-y: auto; padding: 16px 20px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55; }
       .event { padding: 6px 0; border-bottom: 1px dashed transparent; }
       .event.iteration { color: var(--accent); font-weight: 700; padding-top: 14px; padding-bottom: 4px; border-top: 1px solid var(--border); margin-top: 10px; }
@@ -94,6 +130,33 @@
     <script type="text/babel" data-presets="react">
       const { useState, useEffect, useRef, useCallback } = React;
 
+      // ---------- helpers --------------------------------------------------
+
+      function fmtTime(iso) {
+        if (!iso) return "";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return "";
+        const now = new Date();
+        const sameDay = d.toDateString() === now.toDateString();
+        if (sameDay) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const diffDays = Math.floor((now - d) / 86400000);
+        if (diffDays < 7) return d.toLocaleDateString([], { weekday: "short" }) + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return d.toLocaleDateString();
+      }
+
+      function prettyArgs(s) {
+        if (!s) return "(no arguments)";
+        try {
+          const obj = JSON.parse(s);
+          const compact = JSON.stringify(obj);
+          return compact.length > 120 ? compact.slice(0, 120) + "…" : compact;
+        } catch (_) {
+          return s.length > 120 ? s.slice(0, 120) + "…" : s;
+        }
+      }
+
+      // ---------- App ------------------------------------------------------
+
       function App() {
         const [form, setForm] = useState(() => ({
           model: localStorage.getItem("oa.model") || "qwen2.5-coder:7b",
@@ -102,11 +165,11 @@
           goal: "",
           max_iterations: Number(localStorage.getItem("oa.maxIter") || 25),
         }));
-        const [sessionId, setSessionId] = useState(null);
-        const [events, setEvents] = useState([]);
-        const [status, setStatus] = useState("idle"); // idle | running | done | error
-        const [doneReason, setDoneReason] = useState(null);
+        const [sessions, setSessions] = useState([]);
+        const [current, setCurrent] = useState(null);
+        // current shape: { id, goal, model, workdir, status, events, isLive }
         const [submitError, setSubmitError] = useState(null);
+
         const esRef = useRef(null);
         const eventsEndRef = useRef(null);
 
@@ -118,46 +181,57 @@
         }, [form.model, form.host, form.workdir, form.max_iterations]);
 
         useEffect(() => {
-          // Auto-scroll to bottom as events stream in.
           if (eventsEndRef.current) {
             eventsEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
           }
-        }, [events.length]);
+        }, [current?.events?.length]);
 
-        // Cleanup EventSource on unmount.
+        const refreshSessions = useCallback(async () => {
+          try {
+            const r = await fetch("/api/sessions");
+            const list = await r.json();
+            setSessions(list || []);
+          } catch (_) { /* ignore */ }
+        }, []);
+
+        useEffect(() => {
+          refreshSessions();
+          const t = setInterval(refreshSessions, 5000);
+          return () => clearInterval(t);
+        }, [refreshSessions]);
+
         useEffect(() => () => { if (esRef.current) esRef.current.close(); }, []);
 
-        const connect = useCallback((id) => {
+        const connectSSE = useCallback((id) => {
           if (esRef.current) esRef.current.close();
           const es = new EventSource(`/api/sessions/${id}/events`);
           esRef.current = es;
           const handle = (raw) => {
             try {
               const ev = JSON.parse(raw.data);
-              setEvents((prev) => [...prev, ev]);
-              if (ev.type === "done") {
-                setStatus(ev.reason === "finished" ? "done" : "error");
-                setDoneReason(ev.reason);
-                es.close();
-                esRef.current = null;
-              }
+              setCurrent((prev) => {
+                if (!prev || prev.id !== id) return prev;
+                const next = { ...prev, events: [...prev.events, ev] };
+                if (ev.type === "done") {
+                  next.status = ev.reason;
+                  next.isLive = false;
+                  es.close();
+                  esRef.current = null;
+                  refreshSessions();
+                }
+                return next;
+              });
             } catch (_) {}
           };
           ["started", "iteration", "model_text", "tool_call", "tool_result", "error", "done"].forEach((t) => {
             es.addEventListener(t, handle);
           });
-          es.onerror = () => {
-            // EventSource will auto-reconnect; if the session is already done,
-            // close it ourselves to avoid noisy reconnect attempts.
-          };
-        }, []);
+          es.onerror = () => { /* EventSource auto-reconnects */ };
+        }, [refreshSessions]);
 
         const onSubmit = async (e) => {
           e.preventDefault();
           setSubmitError(null);
-          setEvents([]);
-          setDoneReason(null);
-          setStatus("running");
           try {
             const r = await fetch("/api/run", {
               method: "POST",
@@ -172,80 +246,227 @@
             });
             const body = await r.json();
             if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-            setSessionId(body.session_id);
-            connect(body.session_id);
+            setCurrent({
+              id: body.session_id,
+              goal: form.goal,
+              model: form.model,
+              workdir: form.workdir,
+              status: "running",
+              events: [],
+              isLive: true,
+            });
+            connectSSE(body.session_id);
+            refreshSessions();
           } catch (err) {
-            setStatus("error");
+            setSubmitError(String(err.message || err));
+          }
+        };
+
+        const onContinue = async (e) => {
+          e.preventDefault();
+          if (!current?.id) return;
+          setSubmitError(null);
+          try {
+            const r = await fetch(`/api/sessions/${current.id}/continue`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                goal: form.goal,
+                host: form.host,
+                max_iterations: Number(form.max_iterations) || 25,
+              }),
+            });
+            const body = await r.json();
+            if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+            setCurrent((prev) => prev ? { ...prev, status: "running", isLive: true } : prev);
+            setForm((prev) => ({ ...prev, goal: "" }));
+            connectSSE(current.id);
+            refreshSessions();
+          } catch (err) {
             setSubmitError(String(err.message || err));
           }
         };
 
         const onCancel = async () => {
-          if (!sessionId) return;
-          await fetch(`/api/sessions/${sessionId}/cancel`, { method: "POST" });
+          if (!current?.id) return;
+          await fetch(`/api/sessions/${current.id}/cancel`, { method: "POST" });
         };
 
-        const headerStatus = (() => {
-          if (status === "running") return <span className="status running">running</span>;
-          if (status === "done") return <span className="status done">finished</span>;
-          if (status === "error") return <span className="status error">{doneReason || "error"}</span>;
-          return <span className="status">idle</span>;
-        })();
+        const onPickSession = async (id) => {
+          if (current?.id === id && current?.isLive) return;
+          if (esRef.current) { esRef.current.close(); esRef.current = null; }
+          try {
+            const r = await fetch(`/api/sessions/${id}`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const detail = await r.json();
+            const isLive = detail.status === "running";
+            setCurrent({
+              id: detail.id,
+              goal: detail.goal,
+              model: detail.model,
+              workdir: detail.workdir,
+              status: detail.status,
+              events: detail.events || [],
+              isLive,
+            });
+            if (isLive) connectSSE(id);
+          } catch (err) {
+            setSubmitError(String(err.message || err));
+          }
+        };
 
+        const onDeleteSession = async (id, e) => {
+          e.stopPropagation();
+          if (!confirm("Delete this session? This can't be undone.")) return;
+          await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+          if (current?.id === id) {
+            if (esRef.current) { esRef.current.close(); esRef.current = null; }
+            setCurrent(null);
+          }
+          refreshSessions();
+        };
+
+        const onNewRun = () => {
+          if (esRef.current) { esRef.current.close(); esRef.current = null; }
+          setCurrent(null);
+          setSubmitError(null);
+        };
+
+        // -------------------------------------------------------------------
         return (
           <div className="app">
             <aside className="sidebar">
-              <h1>LocalAgent</h1>
-              <div className="sub">Agentic loop · litellm + langchaingo · Ollama</div>
-              <form onSubmit={onSubmit}>
-                <div className="field">
-                  <label>Model</label>
-                  <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}
-                         placeholder="qwen2.5-coder:7b" />
+              <div>
+                <h1>LocalAgent</h1>
+                <div className="sub">Agentic loop · litellm + langchaingo · Ollama</div>
+              </div>
+
+              {(() => {
+                const isContinue = current && !current.isLive && current.status !== "running";
+                return (
+                  <form onSubmit={isContinue ? onContinue : onSubmit}>
+                    {isContinue ? (
+                      <div className="continue-banner">
+                        <div className="continue-banner-title">Continuing session</div>
+                        <div className="continue-banner-meta">
+                          <span title={current.workdir}>{current.workdir}</span>
+                          <span>·</span>
+                          <span>{current.model}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="field">
+                          <label>Model</label>
+                          <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}
+                                 placeholder="qwen2.5-coder:7b" />
+                        </div>
+                        <div className="field">
+                          <label>Ollama host</label>
+                          <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })}
+                                 placeholder="http://localhost:11434" />
+                        </div>
+                        <div className="field">
+                          <label>Project directory</label>
+                          <input value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })}
+                                 placeholder="C:\path\to\project" />
+                        </div>
+                      </>
+                    )}
+                    <div className="field">
+                      <label>{isContinue ? "Next instruction" : "Goal"}</label>
+                      <textarea value={form.goal} onChange={(e) => setForm({ ...form, goal: e.target.value })}
+                                placeholder={isContinue ? "Now also add metrics for the /healthz endpoint" : "Add a /healthz endpoint and a test for it"} required />
+                    </div>
+                    <div className="field">
+                      <label>{isContinue ? "Additional iterations" : "Max iterations"}</label>
+                      <input type="number" min="1" max="200" value={form.max_iterations}
+                             onChange={(e) => setForm({ ...form, max_iterations: e.target.value })} />
+                    </div>
+                    {submitError && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{submitError}</div>}
+                    {current?.isLive ? (
+                      <button type="button" className="btn danger" onClick={onCancel}>Cancel run</button>
+                    ) : (
+                      <button type="submit" className="btn" disabled={!form.goal.trim()}>
+                        {isContinue ? "Continue session" : "Run agent"}
+                      </button>
+                    )}
+                  </form>
+                );
+              })()}
+
+              <div>
+                <div className="sessions-header">
+                  <h2>Sessions</h2>
+                  {current && !current.isLive && (
+                    <button className="btn ghost" style={{ width: "auto" }} onClick={onNewRun}>New</button>
+                  )}
                 </div>
-                <div className="field">
-                  <label>Ollama host</label>
-                  <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })}
-                         placeholder="http://localhost:11434" />
+                <div className="sessions">
+                  {sessions.length === 0 ? (
+                    <div className="sessions-empty">No sessions yet.</div>
+                  ) : sessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className={"session-item" + (current?.id === s.id ? " active" : "")}
+                      onClick={() => onPickSession(s.id)}
+                    >
+                      <div>
+                        <div className="goal" title={s.goal}>{s.goal || "(no goal)"}</div>
+                        <div className="meta">
+                          <span className={"dot " + s.status} />
+                          <span>{s.status}</span>
+                          <span>·</span>
+                          <span>{fmtTime(s.started_at)}</span>
+                        </div>
+                      </div>
+                      <button
+                        className="delete"
+                        title="Delete session"
+                        onClick={(e) => onDeleteSession(s.id, e)}
+                      >×</button>
+                    </div>
+                  ))}
                 </div>
-                <div className="field">
-                  <label>Project directory</label>
-                  <input value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })}
-                         placeholder="C:\path\to\project" />
-                </div>
-                <div className="field">
-                  <label>Goal</label>
-                  <textarea value={form.goal} onChange={(e) => setForm({ ...form, goal: e.target.value })}
-                            placeholder="Add a /healthz endpoint and a test for it" required />
-                </div>
-                <div className="field">
-                  <label>Max iterations</label>
-                  <input type="number" min="1" max="200" value={form.max_iterations}
-                         onChange={(e) => setForm({ ...form, max_iterations: e.target.value })} />
-                </div>
-                {submitError && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{submitError}</div>}
-                {status === "running" ? (
-                  <button type="button" className="btn danger" onClick={onCancel}>Cancel run</button>
-                ) : (
-                  <button type="submit" className="btn" disabled={!form.goal.trim()}>Run agent</button>
-                )}
-              </form>
+              </div>
             </aside>
 
             <main className="main">
-              <div className="header">
-                <strong>Session</strong>
-                {sessionId ? <code style={{ color: "var(--muted)" }}>{sessionId}</code> : <span style={{ color: "var(--muted)" }}>—</span>}
-                {headerStatus}
-              </div>
-              <div className="events">
-                {events.length === 0 ? (
-                  <div className="empty">Configure on the left, then click <em>Run agent</em>. Tool calls and model output will stream here.</div>
-                ) : (
-                  events.map((e, i) => <EventRow key={i} ev={e} />)
-                )}
-                <div ref={eventsEndRef} />
-              </div>
+              {current ? (
+                <>
+                  <div className="header">
+                    <span className="title" title={current.goal}>
+                      {current.goal.length > 80 ? current.goal.slice(0, 80) + "…" : current.goal}
+                    </span>
+                    <span className={"status " + current.status}>{current.status}</span>
+                    <div className="spacer" />
+                    <div className="meta">
+                      <span>{current.model}</span>
+                      <span>·</span>
+                      <code title={current.workdir}>
+                        {current.workdir.length > 40 ? "…" + current.workdir.slice(-40) : current.workdir}
+                      </code>
+                      <span>·</span>
+                      <code title={current.id}>{current.id.slice(0, 8)}</code>
+                    </div>
+                  </div>
+                  <div className="events">
+                    {current.events.length === 0 ? (
+                      <div className="empty">Waiting for first event…</div>
+                    ) : (
+                      current.events.map((e, i) => <EventRow key={i} ev={e} />)
+                    )}
+                    <div ref={eventsEndRef} />
+                  </div>
+                </>
+              ) : (
+                <div className="events">
+                  <div className="empty">
+                    Configure on the left, then click <em>Run agent</em>.<br />
+                    Or pick a past session from the list.
+                  </div>
+                </div>
+              )}
             </main>
           </div>
         );
@@ -287,17 +508,6 @@
             );
           default:
             return null;
-        }
-      }
-
-      function prettyArgs(s) {
-        if (!s) return "(no arguments)";
-        try {
-          const obj = JSON.parse(s);
-          const compact = JSON.stringify(obj);
-          return compact.length > 120 ? compact.slice(0, 120) + "…" : compact;
-        } catch (_) {
-          return s.length > 120 ? s.slice(0, 120) + "…" : s;
         }
       }
 

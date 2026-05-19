@@ -17,15 +17,16 @@ import (
 
 // Server hosts the HTTP API plus the embedded React UI.
 type Server struct {
-	mgr        *Manager
-	static     http.Handler
+	mgr         *Manager
+	static      http.Handler
 	defaultHost string
 }
 
 // New returns a *Server. staticFS must contain an index.html at its root.
-func New(staticFS fs.FS, defaultOllamaHost string) *Server {
+// store may be nil for ephemeral (in-memory-only) operation.
+func New(staticFS fs.FS, defaultOllamaHost string, store *FileStore) *Server {
 	return &Server{
-		mgr:         NewManager(),
+		mgr:         NewManager(store),
 		static:      http.FileServer(http.FS(staticFS)),
 		defaultHost: defaultOllamaHost,
 	}
@@ -37,8 +38,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/run", s.handleRun)
 	mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /api/sessions/{id}/continue", s.handleContinueSession)
 	mux.Handle("/", s.static)
 	return withCORS(withLogging(mux))
 }
@@ -102,10 +105,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			Goal:          req.Goal,
 			MaxIterations: req.MaxIterations,
 			Emit:          sess.Append,
+			OnMessages:    sess.SetMessages,
 		})
-		// Run always emits a terminal Done event itself for the normal
-		// happy/cancel paths. If something escaped without one, synthesise it
-		// here so subscribers always see a terminator.
+		// Run always emits a terminal Done event for the normal happy/cancel
+		// paths. If something escaped without one, synthesise it here so
+		// subscribers always see a terminator and persistence kicks in.
 		if runErr != nil && !sess.Done() {
 			sess.Append(agent.Event{
 				Type:   agent.EventDone,
@@ -125,43 +129,156 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runResponse{SessionID: sess.ID})
 }
 
-// ---- sessions list / get --------------------------------------------------
-
-type sessionSummary struct {
-	ID      string `json:"id"`
-	Goal    string `json:"goal"`
-	Model   string `json:"model"`
-	Workdir string `json:"workdir"`
-	Done    bool   `json:"done"`
-}
-
-func summarize(s *Session) sessionSummary {
-	return sessionSummary{ID: s.ID, Goal: s.Goal, Model: s.Model, Workdir: s.Workdir, Done: s.Done()}
-}
+// ---- sessions list / get / delete -----------------------------------------
 
 func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
-	all := s.mgr.List()
-	out := make([]sessionSummary, 0, len(all))
-	for _, sess := range all {
-		out = append(out, summarize(sess))
+	out := s.mgr.Summaries()
+	if out == nil {
+		out = []Summary{}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// detailResponse is summary + full event history.
+type detailResponse struct {
+	Summary
+	Events []agent.Event `json:"events"`
+}
+
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
 	sess, ok := s.mgr.Get(id)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, summarize(sess))
+	writeJSON(w, http.StatusOK, detailResponse{Summary: sess.Summary(), Events: sess.History()})
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
+	if err := s.mgr.Delete(id); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---- continue -------------------------------------------------------------
+
+type continueRequest struct {
+	Goal          string `json:"goal"`
+	Host          string `json:"host"`
+	MaxIterations int    `json:"max_iterations"`
+}
+
+// handleContinueSession runs another agent loop on top of a finished session's
+// conversation. Model and workdir are reused from the original run; the caller
+// supplies a new instruction (goal) and a fresh iteration budget.
+func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
+	var req continueRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Goal = strings.TrimSpace(req.Goal)
+	if req.Goal == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("goal is required"))
+		return
+	}
+	if req.MaxIterations <= 0 {
+		req.MaxIterations = 25
+	}
+
+	sess, ok := s.mgr.Get(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !sess.Done() {
+		httpError(w, http.StatusConflict, fmt.Errorf("session is still running"))
+		return
+	}
+	prior := sess.Messages()
+	if len(prior) == 0 {
+		httpError(w, http.StatusConflict, fmt.Errorf("session has no stored conversation — cannot continue (was it created before persistence was added?)"))
+		return
+	}
+	prior = SanitizeMessagesForContinue(prior)
+	if len(prior) == 0 {
+		httpError(w, http.StatusConflict, fmt.Errorf("session conversation is malformed — cannot continue"))
+		return
+	}
+
+	host := req.Host
+	if host == "" {
+		host = s.defaultHost
+	}
+	reg, err := tools.Build(sess.Workdir)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("workdir: %w", err))
+		return
+	}
+	client, err := llm.New(sess.Model, host)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("llm: %w", err))
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.Reopen(cancel)
+
+	go func() {
+		defer cancel()
+		runErr := agent.Run(ctx, agent.Config{
+			LLM:             client,
+			Tools:           reg,
+			Goal:            req.Goal,
+			MaxIterations:   req.MaxIterations,
+			InitialMessages: prior,
+			Emit:            sess.Append,
+			OnMessages:      sess.SetMessages,
+		})
+		if runErr != nil && !sess.Done() {
+			sess.Append(agent.Event{
+				Type:   agent.EventDone,
+				TimeMS: time.Now().UnixMilli(),
+				Reason: agent.ReasonError,
+				Text:   runErr.Error(),
+			})
+		} else if runErr == nil && !sess.Done() {
+			sess.Append(agent.Event{
+				Type:   agent.EventDone,
+				TimeMS: time.Now().UnixMilli(),
+				Reason: agent.ReasonFinished,
+			})
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, runResponse{SessionID: sess.ID})
 }
 
 // ---- SSE events -----------------------------------------------------------
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
 	sess, ok := s.mgr.Get(id)
 	if !ok {
 		http.NotFound(w, r)
@@ -226,6 +343,10 @@ func writeSSEEvent(w http.ResponseWriter, e agent.Event) bool {
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
 	sess, ok := s.mgr.Get(id)
 	if !ok {
 		http.NotFound(w, r)
@@ -250,7 +371,7 @@ func httpError(w http.ResponseWriter, status int, err error) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

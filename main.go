@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ func main() {
 		workdir = flag.String("workdir", ".", "Project directory the agent operates inside (CLI mode only)")
 		goal    = flag.String("goal", "", "Task for the agent (CLI mode). If empty, reads from stdin.")
 		maxIter = flag.Int("max-iter", 25, "Maximum agent iterations before giving up (CLI mode default).")
+		dataDir = flag.String("data-dir", "", "Directory to persist sessions in. Default: ~/.localagent/sessions/")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `LocalAgent — agentic coding loop backed by a local Ollama model.
@@ -44,19 +46,42 @@ Flags:
 	flag.Parse()
 
 	if *serve {
-		runServer(*addr, *host)
+		runServer(*addr, *host, *dataDir)
 		return
 	}
 	runCLI(*model, *host, *workdir, *goal, *maxIter)
 }
 
+// resolveDataDir picks a default if dataDir is empty. The default sits under
+// the user's home directory so multiple instances on one machine share history.
+func resolveDataDir(dataDir string) (string, error) {
+	if dataDir != "" {
+		return dataDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".localagent", "sessions"), nil
+}
+
 // ---- server mode ----------------------------------------------------------
 
-func runServer(addr, defaultHost string) {
+func runServer(addr, defaultHost, dataDir string) {
 	if defaultHost == "" {
 		defaultHost = "http://localhost:11434"
 	}
-	srv := server.New(web.FS(), defaultHost)
+	resolvedDataDir, err := resolveDataDir(dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "data dir: %v\n", err)
+		os.Exit(1)
+	}
+	store, err := server.NewFileStore(resolvedDataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session store: %v\n", err)
+		os.Exit(1)
+	}
+	srv := server.New(web.FS(), defaultHost, store)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,7 +93,9 @@ func runServer(addr, defaultHost string) {
 	}
 
 	go func() {
-		fmt.Fprintf(os.Stderr, "LocalAgent listening on http://localhost%s (default Ollama host: %s)\n", addr, defaultHost)
+		fmt.Fprintf(os.Stderr, "LocalAgent listening on http://localhost%s\n", addr)
+		fmt.Fprintf(os.Stderr, "  default Ollama host: %s\n", defaultHost)
+		fmt.Fprintf(os.Stderr, "  session data dir:   %s\n", resolvedDataDir)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 			os.Exit(1)

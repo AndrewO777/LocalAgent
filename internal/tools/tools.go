@@ -291,13 +291,24 @@ func editFileTool(root string) Tool {
 
 // ----- run_command ---------------------------------------------------------
 
-const cmdTimeout = 2 * time.Minute
-const maxCmdOutput = 32 * 1024
+const (
+	defaultCmdTimeoutSec = 120
+	maxCmdTimeoutSec     = 600
+	maxCmdOutput         = 32 * 1024
+	// waitDelay is the grace period between Cancel firing and the I/O pipes
+	// being force-closed. Without it, hung children keep the pipes open and
+	// CombinedOutput blocks forever even after the kill signal.
+	waitDelay = 3 * time.Second
+)
 
 func runCommandTool(root string) Tool {
 	return Tool{
-		Name:        "run_command",
-		Description: "Run a shell command inside the project directory. Output is merged stdout+stderr, truncated at ~32 KB, with a 2 minute timeout.",
+		Name: "run_command",
+		Description: "Run a shell command inside the project directory and wait for it to exit. " +
+			"Output is merged stdout+stderr, truncated at ~32 KB. Default timeout is 120 s; " +
+			"pass timeout_sec up to 600 to extend. Do NOT use this to start long-running " +
+			"foreground servers (npm run dev, npx vite, any --watch process) — they will " +
+			"hit the timeout and be killed. Use build/test/lint commands that exit on their own.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -305,12 +316,17 @@ func runCommandTool(root string) Tool {
 					"type":        "string",
 					"description": "Shell command line. Runs via PowerShell on Windows and /bin/sh elsewhere.",
 				},
+				"timeout_sec": map[string]any{
+					"type":        "integer",
+					"description": "Optional timeout in seconds. Default 120, max 600.",
+				},
 			},
 			"required": []string{"command"},
 		},
 		Handler: func(ctx context.Context, args string) (string, error) {
 			var in struct {
-				Command string `json:"command"`
+				Command    string `json:"command"`
+				TimeoutSec int    `json:"timeout_sec"`
 			}
 			if err := decode(args, &in); err != nil {
 				return "", err
@@ -318,16 +334,32 @@ func runCommandTool(root string) Tool {
 			if strings.TrimSpace(in.Command) == "" {
 				return "", errors.New("command is empty")
 			}
-			ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
+			timeoutSec := in.TimeoutSec
+			if timeoutSec <= 0 {
+				timeoutSec = defaultCmdTimeoutSec
+			}
+			if timeoutSec > maxCmdTimeoutSec {
+				timeoutSec = maxCmdTimeoutSec
+			}
+
+			cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 			defer cancel()
 
 			var cmd *exec.Cmd
 			if runtime.GOOS == "windows" {
-				cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", in.Command)
+				cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", in.Command)
 			} else {
-				cmd = exec.CommandContext(ctx, "/bin/sh", "-c", in.Command)
+				cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-c", in.Command)
 			}
 			cmd.Dir = root
+			setProcessAttrs(cmd)
+			// Override CommandContext's default Cancel (which only kills the
+			// direct child) with a tree kill. WaitDelay forces the stdout/stderr
+			// pipes closed if the kill doesn't drain them — without it,
+			// CombinedOutput blocks forever when grandchildren keep the pipe open.
+			cmd.Cancel = func() error { return killProcessTree(cmd) }
+			cmd.WaitDelay = waitDelay
+
 			out, runErr := cmd.CombinedOutput()
 			body := out
 			if len(body) > maxCmdOutput {
@@ -335,9 +367,12 @@ func runCommandTool(root string) Tool {
 			}
 			var b strings.Builder
 			if runErr != nil {
-				if ctx.Err() == context.DeadlineExceeded {
-					b.WriteString("[timed out after 2m]\n")
-				} else {
+				switch {
+				case cmdCtx.Err() == context.DeadlineExceeded:
+					fmt.Fprintf(&b, "[timed out after %ds — process tree killed]\n", timeoutSec)
+				case ctx.Err() == context.Canceled:
+					b.WriteString("[canceled — process tree killed]\n")
+				default:
 					fmt.Fprintf(&b, "[exit error: %v]\n", runErr)
 				}
 			}
