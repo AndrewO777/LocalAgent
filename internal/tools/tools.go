@@ -178,6 +178,9 @@ func readFileTool(root string) Tool {
 			if err := decode(args, &in); err != nil {
 				return "", err
 			}
+			if strings.TrimSpace(in.Path) == "" {
+				return "", errors.New("path is required (relative file path inside the project)")
+			}
 			full, err := resolve(root, in.Path)
 			if err != nil {
 				return "", err
@@ -222,9 +225,15 @@ func writeFileTool(root string) Tool {
 			if err := decode(args, &in); err != nil {
 				return "", err
 			}
+			if strings.TrimSpace(in.Path) == "" {
+				return "", errors.New("path is required (relative file path inside the project — do NOT omit it)")
+			}
 			full, err := resolve(root, in.Path)
 			if err != nil {
 				return "", err
+			}
+			if info, err := os.Stat(full); err == nil && info.IsDir() {
+				return "", fmt.Errorf("path %q is an existing directory, not a file", in.Path)
 			}
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 				return "", err
@@ -261,8 +270,11 @@ func editFileTool(root string) Tool {
 			if err := decode(args, &in); err != nil {
 				return "", err
 			}
+			if strings.TrimSpace(in.Path) == "" {
+				return "", errors.New("path is required (relative file path inside the project)")
+			}
 			if in.OldText == "" {
-				return "", errors.New("old_text must not be empty")
+				return "", errors.New("edit_file requires non-empty old_text — it is the exact text to find and replace. To create a new file or fully replace an existing file's contents, call write_file with the full contents instead.")
 			}
 			full, err := resolve(root, in.Path)
 			if err != nil {

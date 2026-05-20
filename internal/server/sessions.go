@@ -33,10 +33,12 @@ type Summary struct {
 // Session holds the per-run state: a buffered history of events plus active
 // subscriber channels for live tailing via SSE.
 type Session struct {
-	ID      string
-	Goal    string
-	Model   string
-	Workdir string
+	ID              string
+	Goal            string
+	Model           string
+	CompactionModel string
+	ContextTokens   int
+	Workdir         string
 
 	mu          sync.Mutex
 	startedAt   time.Time
@@ -230,15 +232,17 @@ func (s *Session) toStored() StoredSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return StoredSession{
-		ID:        s.ID,
-		Goal:      s.Goal,
-		Model:     s.Model,
-		Workdir:   s.Workdir,
-		StartedAt: s.startedAt,
-		EndedAt:   s.endedAt,
-		Status:    s.status,
-		Events:    append([]agent.Event(nil), s.history...),
-		Messages:  append([]litellm.Message(nil), s.messages...),
+		ID:              s.ID,
+		Goal:            s.Goal,
+		Model:           s.Model,
+		CompactionModel: s.CompactionModel,
+		ContextTokens:   s.ContextTokens,
+		Workdir:         s.Workdir,
+		StartedAt:       s.startedAt,
+		EndedAt:         s.endedAt,
+		Status:          s.status,
+		Events:          append([]agent.Event(nil), s.history...),
+		Messages:        append([]litellm.Message(nil), s.messages...),
 	}
 }
 
@@ -246,16 +250,18 @@ func (s *Session) toStored() StoredSession {
 // until Reopen() is called, so Subscribe returns history then a closed channel.
 func sessionFromStored(ss *StoredSession) *Session {
 	return &Session{
-		ID:        ss.ID,
-		Goal:      ss.Goal,
-		Model:     ss.Model,
-		Workdir:   ss.Workdir,
-		startedAt: ss.StartedAt,
-		endedAt:   ss.EndedAt,
-		status:    ss.Status,
-		history:   ss.Events,
-		messages:  ss.Messages,
-		done:      true,
+		ID:              ss.ID,
+		Goal:            ss.Goal,
+		Model:           ss.Model,
+		CompactionModel: ss.CompactionModel,
+		ContextTokens:   ss.ContextTokens,
+		Workdir:         ss.Workdir,
+		startedAt:       ss.StartedAt,
+		endedAt:         ss.EndedAt,
+		status:          ss.Status,
+		history:         ss.Events,
+		messages:        ss.Messages,
+		done:            true,
 	}
 }
 
@@ -270,16 +276,18 @@ func NewManager(store *FileStore) *Manager {
 	return &Manager{sessions: make(map[string]*Session), store: store}
 }
 
-func (m *Manager) Create(goal, model, workdir string, cancel context.CancelFunc) *Session {
+func (m *Manager) Create(goal, model, compactionModel string, contextTokens int, workdir string, cancel context.CancelFunc) *Session {
 	s := &Session{
-		ID:        newID(),
-		Goal:      goal,
-		Model:     model,
-		Workdir:   workdir,
-		startedAt: time.Now(),
-		status:    "running",
-		cancel:    cancel,
-		store:     m.store,
+		ID:              newID(),
+		Goal:            goal,
+		Model:           model,
+		CompactionModel: compactionModel,
+		ContextTokens:   contextTokens,
+		Workdir:         workdir,
+		startedAt:       time.Now(),
+		status:          "running",
+		cancel:          cancel,
+		store:           m.store,
 	}
 	m.mu.Lock()
 	m.sessions[s.ID] = s

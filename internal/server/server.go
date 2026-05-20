@@ -49,11 +49,13 @@ func (s *Server) Routes() http.Handler {
 // ---- run ------------------------------------------------------------------
 
 type runRequest struct {
-	Model         string `json:"model"`
-	Host          string `json:"host"`
-	Workdir       string `json:"workdir"`
-	Goal          string `json:"goal"`
-	MaxIterations int    `json:"max_iterations"`
+	Model           string `json:"model"`
+	CompactionModel string `json:"compaction_model"`
+	Host            string `json:"host"`
+	Workdir         string `json:"workdir"`
+	Goal            string `json:"goal"`
+	MaxIterations   int    `json:"max_iterations"`
+	ContextTokens   int    `json:"context_tokens"`
 }
 
 type runResponse struct {
@@ -67,6 +69,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Model = strings.TrimSpace(req.Model)
+	req.CompactionModel = strings.TrimSpace(req.CompactionModel)
 	req.Workdir = strings.TrimSpace(req.Workdir)
 	req.Goal = strings.TrimSpace(req.Goal)
 	if req.Model == "" || req.Workdir == "" || req.Goal == "" {
@@ -91,19 +94,26 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, fmt.Errorf("llm: %w", err))
 		return
 	}
+	compactor, err := buildCompactor(req.CompactionModel, req.Model, host, req.ContextTokens)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("compaction llm: %w", err))
+		return
+	}
 
 	// The session's context is independent of the HTTP request — the run
 	// continues even after the POST returns.
 	ctx, cancel := context.WithCancel(context.Background())
-	sess := s.mgr.Create(req.Goal, req.Model, reg.Workdir(), cancel)
+	sess := s.mgr.Create(req.Goal, req.Model, req.CompactionModel, req.ContextTokens, reg.Workdir(), cancel)
 
 	go func() {
 		defer cancel()
+		s.checkContextWindow(sess, compactor, host, req.Model, req.ContextTokens)
 		runErr := agent.Run(ctx, agent.Config{
 			LLM:           client,
 			Tools:         reg,
 			Goal:          req.Goal,
 			MaxIterations: req.MaxIterations,
+			Compactor:     compactor,
 			Emit:          sess.Append,
 			OnMessages:    sess.SetMessages,
 		})
@@ -175,9 +185,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // ---- continue -------------------------------------------------------------
 
 type continueRequest struct {
-	Goal          string `json:"goal"`
-	Host          string `json:"host"`
-	MaxIterations int    `json:"max_iterations"`
+	Goal            string `json:"goal"`
+	Host            string `json:"host"`
+	MaxIterations   int    `json:"max_iterations"`
+	CompactionModel string `json:"compaction_model"`
+	ContextTokens   int    `json:"context_tokens"`
 }
 
 // handleContinueSession runs another agent loop on top of a finished session's
@@ -238,17 +250,35 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Continue reuses the session's stored compaction settings unless the
+	// request overrides them. Treat empty string / zero as "no override".
+	compactionModel := strings.TrimSpace(req.CompactionModel)
+	if compactionModel == "" {
+		compactionModel = sess.CompactionModel
+	}
+	contextTokens := req.ContextTokens
+	if contextTokens <= 0 {
+		contextTokens = sess.ContextTokens
+	}
+	compactor, err := buildCompactor(compactionModel, sess.Model, host, contextTokens)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("compaction llm: %w", err))
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.Reopen(cancel)
 
 	go func() {
 		defer cancel()
+		s.checkContextWindow(sess, compactor, host, sess.Model, contextTokens)
 		runErr := agent.Run(ctx, agent.Config{
 			LLM:             client,
 			Tools:           reg,
 			Goal:            req.Goal,
 			MaxIterations:   req.MaxIterations,
 			InitialMessages: prior,
+			Compactor:       compactor,
 			Emit:            sess.Append,
 			OnMessages:      sess.SetMessages,
 		})
@@ -299,7 +329,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer unsub()
 
 	// Replay history first so a late-connecting client sees the full run.
+	// When the session is currently running, it must be a continued session —
+	// any `done` events in history are from prior runs. Skip them: clients
+	// treat `done` as "stream finished" and would close the connection,
+	// missing the live events of the current run.
+	skipPriorDone := !sess.Done()
 	for _, e := range history {
+		if skipPriorDone && e.Type == agent.EventDone {
+			continue
+		}
 		if !writeSSEEvent(w, e) {
 			return
 		}
@@ -357,6 +395,66 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+// buildCompactor returns a Compactor configured for the given session. If
+// contextTokens is 0, returns nil — the agent skips compaction entirely.
+// If compactionModel is empty, it falls back to the main model so the same
+// Ollama instance handles summarization. Returns an error only if building
+// the compaction LLM client itself fails.
+func buildCompactor(compactionModel, mainModel, host string, contextTokens int) (*agent.Compactor, error) {
+	if contextTokens <= 0 {
+		return nil, nil
+	}
+	model := strings.TrimSpace(compactionModel)
+	if model == "" {
+		model = mainModel
+	}
+	client, err := llm.New(model, host)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewCompactor(client, contextTokens), nil
+}
+
+// checkContextWindow probes Ollama for the effective num_ctx of `model` and,
+// if a mismatch with userCtx is detected, emits a warning event into the
+// session and clamps the compactor's budget. Best-effort; on probe failure
+// the user's value is left untouched.
+//
+// Returns the (possibly clamped) context-tokens value the compactor should
+// use.
+func (s *Server) checkContextWindow(sess *Session, comp *agent.Compactor, host, model string, userCtx int) int {
+	if comp == nil || userCtx <= 0 {
+		return userCtx
+	}
+	probe := llm.ProbeContextLength(host, model)
+
+	switch {
+	case probe.EffectiveCtx > 0 && probe.EffectiveCtx < userCtx:
+		// Ollama will serve less than the user configured. Clamp + warn.
+		sess.Append(warningEvent(fmt.Sprintf(
+			"Ollama will only serve %d tokens for %s (you configured %d). %s. Compaction budget clamped to %d. To use more, set num_ctx in the model's Modelfile or OLLAMA_CONTEXT_LENGTH on the server — see README.",
+			probe.EffectiveCtx, model, userCtx, probe.Note, probe.EffectiveCtx,
+		)))
+		comp.ContextTokens = probe.EffectiveCtx
+		return probe.EffectiveCtx
+	case probe.EffectiveCtx == 0 && probe.Source == "show" && userCtx > 4096:
+		// Model has no num_ctx set; Ollama default (4096) likely applies.
+		sess.Append(warningEvent(fmt.Sprintf(
+			"%s. Your context_tokens=%d may not be honored by Ollama — prompts could be silently truncated. To verify, set num_ctx explicitly via a custom Modelfile (see README).",
+			probe.Note, userCtx,
+		)))
+	}
+	return userCtx
+}
+
+func warningEvent(text string) agent.Event {
+	return agent.Event{
+		Type:   agent.EventModelText,
+		TimeMS: time.Now().UnixMilli(),
+		Text:   "⚠ " + text,
+	}
+}
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")

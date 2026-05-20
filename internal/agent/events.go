@@ -11,6 +11,7 @@ const (
 	EventModelText  EventType = "model_text"
 	EventToolCall   EventType = "tool_call"
 	EventToolResult EventType = "tool_result"
+	EventCompaction EventType = "compaction"
 	EventError      EventType = "error"
 	EventDone       EventType = "done"
 )
@@ -36,6 +37,11 @@ type Event struct {
 	IsError   bool      `json:"is_error,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	Summary   string    `json:"summary,omitempty"`
+
+	// Compaction-event fields.
+	Kind         string `json:"kind,omitempty"`          // elide | summarize | trim
+	TokensBefore int    `json:"tokens_before,omitempty"` // estimated tokens before this step
+	TokensAfter  int    `json:"tokens_after,omitempty"`  // estimated tokens after this step
 }
 
 func newEvent(t EventType) Event {

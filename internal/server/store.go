@@ -22,15 +22,17 @@ import (
 // the LLM conversation state needed to support /continue — events are for the
 // UI, messages are for the model.
 type StoredSession struct {
-	ID        string            `json:"id"`
-	Goal      string            `json:"goal"`
-	Model     string            `json:"model"`
-	Workdir   string            `json:"workdir"`
-	StartedAt time.Time         `json:"started_at"`
-	EndedAt   time.Time         `json:"ended_at,omitempty"`
-	Status    string            `json:"status"`
-	Events    []agent.Event     `json:"events"`
-	Messages  []litellm.Message `json:"messages,omitempty"`
+	ID              string            `json:"id"`
+	Goal            string            `json:"goal"`
+	Model           string            `json:"model"`
+	CompactionModel string            `json:"compaction_model,omitempty"`
+	ContextTokens   int               `json:"context_tokens,omitempty"`
+	Workdir         string            `json:"workdir"`
+	StartedAt       time.Time         `json:"started_at"`
+	EndedAt         time.Time         `json:"ended_at,omitempty"`
+	Status          string            `json:"status"`
+	Events          []agent.Event     `json:"events"`
+	Messages        []litellm.Message `json:"messages,omitempty"`
 }
 
 // FileStore persists sessions as one JSON file per session inside dir. Writes

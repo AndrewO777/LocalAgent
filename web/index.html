@@ -115,6 +115,8 @@
       .event.tool_call .name { color: var(--purple); font-weight: 600; }
       .event.tool_result { color: var(--muted); white-space: pre-wrap; padding-left: 16px; border-left: 2px solid var(--border); }
       .event.tool_result.error { color: var(--red); border-left-color: var(--red); }
+      .event.compaction { color: var(--purple); font-style: italic; padding-left: 16px; border-left: 2px dotted var(--purple); }
+      .event.compaction.error { color: var(--red); border-left-color: var(--red); }
       .event.done { color: var(--green); font-weight: 700; padding-top: 14px; }
       .event.done.error { color: var(--red); }
       .event.done.canceled, .event.done.max_iter { color: var(--yellow); }
@@ -160,10 +162,12 @@
       function App() {
         const [form, setForm] = useState(() => ({
           model: localStorage.getItem("oa.model") || "qwen2.5-coder:7b",
+          compaction_model: localStorage.getItem("oa.compactionModel") || "",
           host: localStorage.getItem("oa.host") || "",
           workdir: localStorage.getItem("oa.workdir") || ".",
           goal: "",
           max_iterations: Number(localStorage.getItem("oa.maxIter") || 25),
+          context_tokens: Number(localStorage.getItem("oa.contextTokens") || 32768),
         }));
         const [sessions, setSessions] = useState([]);
         const [current, setCurrent] = useState(null);
@@ -175,10 +179,12 @@
 
         useEffect(() => {
           localStorage.setItem("oa.model", form.model);
+          localStorage.setItem("oa.compactionModel", form.compaction_model);
           localStorage.setItem("oa.host", form.host);
           localStorage.setItem("oa.workdir", form.workdir);
           localStorage.setItem("oa.maxIter", String(form.max_iterations));
-        }, [form.model, form.host, form.workdir, form.max_iterations]);
+          localStorage.setItem("oa.contextTokens", String(form.context_tokens));
+        }, [form.model, form.compaction_model, form.host, form.workdir, form.max_iterations, form.context_tokens]);
 
         useEffect(() => {
           if (eventsEndRef.current) {
@@ -223,7 +229,7 @@
               });
             } catch (_) {}
           };
-          ["started", "iteration", "model_text", "tool_call", "tool_result", "error", "done"].forEach((t) => {
+          ["started", "iteration", "model_text", "tool_call", "tool_result", "compaction", "error", "done"].forEach((t) => {
             es.addEventListener(t, handle);
           });
           es.onerror = () => { /* EventSource auto-reconnects */ };
@@ -238,10 +244,12 @@
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 model: form.model,
+                compaction_model: form.compaction_model,
                 host: form.host,
                 workdir: form.workdir,
                 goal: form.goal,
                 max_iterations: Number(form.max_iterations) || 25,
+                context_tokens: Number(form.context_tokens) || 0,
               }),
             });
             const body = await r.json();
@@ -274,6 +282,8 @@
                 goal: form.goal,
                 host: form.host,
                 max_iterations: Number(form.max_iterations) || 25,
+                compaction_model: form.compaction_model,
+                context_tokens: Number(form.context_tokens) || 0,
               }),
             });
             const body = await r.json();
@@ -371,6 +381,11 @@
                           <input value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })}
                                  placeholder="C:\path\to\project" />
                         </div>
+                        <div className="field">
+                          <label>Compaction model <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+                          <input value={form.compaction_model} onChange={(e) => setForm({ ...form, compaction_model: e.target.value })}
+                                 placeholder="leave blank to reuse main model" />
+                        </div>
                       </>
                     )}
                     <div className="field">
@@ -382,6 +397,11 @@
                       <label>{isContinue ? "Additional iterations" : "Max iterations"}</label>
                       <input type="number" min="1" max="200" value={form.max_iterations}
                              onChange={(e) => setForm({ ...form, max_iterations: e.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>Context window (tokens) <span style={{ textTransform: "none", fontWeight: 400 }}>· 0 disables compaction</span></label>
+                      <input type="number" min="0" max="1000000" step="1024" value={form.context_tokens}
+                             onChange={(e) => setForm({ ...form, context_tokens: e.target.value })} />
                     </div>
                     {submitError && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{submitError}</div>}
                     {current?.isLive ? (
@@ -496,6 +516,17 @@
                 {ev.result}
               </div>
             );
+          case "compaction": {
+            const delta = (ev.tokens_before || 0) - (ev.tokens_after || 0);
+            const arrow = ev.tokens_before != null && ev.tokens_after != null
+              ? ` (${ev.tokens_before} → ${ev.tokens_after} tok, ${delta >= 0 ? "−" : "+"}${Math.abs(delta)})`
+              : "";
+            return (
+              <div className={"event compaction" + (ev.is_error ? " error" : "")}>
+                ⌬ {ev.kind}: {ev.text}{arrow}
+              </div>
+            );
+          }
           case "done":
             return (
               <div className={"event done " + (ev.reason || "")}>

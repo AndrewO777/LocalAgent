@@ -23,7 +23,9 @@ type Client struct {
 //   - DisableKeepAlives so a stale connection (after machine sleep or an
 //     Ollama restart) can't cause silent hangs.
 //   - 5s dial timeout so DNS/network failures surface fast.
-//   - 30s response-header timeout.
+//   - 5m response-header timeout — Ollama can take a while to return the
+//     first byte on a cold model load (especially for larger models). Once
+//     headers arrive, StreamIdleTimeout takes over.
 //
 // Resilience:
 //   - StreamIdleTimeout=60s — if Ollama goes quiet mid-stream, the watchdog
@@ -44,7 +46,7 @@ func New(model, host string) (*Client, error) {
 		Transport: &http.Transport{
 			DisableKeepAlives:     true,
 			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Minute,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
 	}

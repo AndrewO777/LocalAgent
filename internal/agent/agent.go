@@ -50,6 +50,11 @@ type Config struct {
 	// follow-up user message instead of starting a fresh conversation.
 	InitialMessages []litellm.Message
 
+	// Compactor, if non-nil, is invoked after each iteration to keep the
+	// conversation under the model's context budget. nil disables compaction
+	// entirely.
+	Compactor *Compactor
+
 	// Emit is invoked synchronously for every event. Must not block for long;
 	// the server adapter funnels into a buffered channel.
 	Emit func(Event)
@@ -72,6 +77,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 
 	emit := cfg.Emit
+	if cfg.Compactor != nil {
+		cfg.Compactor.Emit = emit
+	}
 	defer func() {
 		if err == nil {
 			return
@@ -201,6 +209,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			emit(resEv)
 
 			messages = append(messages, litellm.ToolMessage(tc.ID, result))
+		}
+
+		// Compaction runs at the end of every iteration so the next LLM call
+		// sees a trimmed transcript. The compactor preserves tool-call
+		// pairing, so the conversation remains valid for the provider.
+		if cfg.Compactor != nil {
+			messages = cfg.Compactor.Apply(ctx, messages)
 		}
 		snapshot()
 	}
