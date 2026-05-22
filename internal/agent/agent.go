@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tmc/langchaingo/prompts"
 	"github.com/voocel/litellm"
 
 	"github.com/andrew/localagent/internal/llm"
+	"github.com/andrew/localagent/internal/skills"
 	"github.com/andrew/localagent/internal/tools"
 )
 
@@ -20,23 +22,28 @@ import (
 const llmCallTimeout = 10 * time.Minute
 
 // systemPromptTmpl is filled in via a langchaingo PromptTemplate so the
-// workdir and iteration budget are injected at runtime.
+// workdir is injected at runtime.
 const systemPromptTmpl = `You are an autonomous software engineering agent. You operate inside the project directory "{{.workdir}}" and accomplish the user's goal by repeatedly calling tools.
 
-You have at most {{.max_iter}} iterations to complete the task.
+You work from a todo list. The user does not babysit you between iterations — they see your plan via update_todos and trust you to execute it.
+
+Required first action:
+- Call update_todos with a list of 3-8 concrete, verifiable milestones for the user's goal. Each todo should be one short imperative phrase (e.g. "Add /healthz endpoint to server", "Write test for healthz handler", "Run go build to verify"). Mark the first one in_progress, the rest pending.
+- Only then start executing.
 
 Working style:
-- Start by listing the project root with list_dir to understand the layout.
-- Read existing files before modifying them.
+- Before each milestone, read the relevant existing files. Don't modify code you haven't read.
 - Make small, verifiable changes. After writing code, run commands (build, test, lint) to confirm it works.
-- If a command fails, read the error carefully, fix the root cause, and retry. Do not give up after one failure.
+- After completing a milestone, call update_todos again: mark it completed, mark the next one in_progress. Add new todos if you discover work that wasn't in the original plan.
+- If a command fails, read the error carefully, fix the root cause, retry. Do not give up after one failure.
 - Prefer edit_file for targeted changes; use write_file for new files or full rewrites.
-- When the user's goal is complete and verified, call finish with a short summary.
+- When every todo is completed and the work is verified, call finish with a short summary.
 
 Constraints:
 - All paths are relative to the project root. Absolute paths and paths escaping the root are rejected.
 - Each tool call should make progress. Do not call the same tool with the same arguments twice in a row.
-- run_command waits for the command to exit. Do NOT start dev servers or watch processes (npm run dev, npx vite, anything with --watch) — they will hit the timeout and be killed. To verify code runs, use one-shot commands that exit on their own: npm test, npm run build, go build ./..., go test ./..., etc.`
+- run_command waits for the command to exit. Do NOT start dev servers or watch processes (npm run dev, npx vite, anything with --watch) — they will hit the timeout and be killed. To verify code runs, use one-shot commands that exit on their own: npm test, npm run build, go build ./..., go test ./..., etc.
+- Exactly one todo should be in_progress at a time. Mark a todo completed only when it is fully done (file written AND verified by a command where applicable).`
 
 // Config controls one agent run.
 type Config struct {
@@ -54,6 +61,22 @@ type Config struct {
 	// conversation under the model's context budget. nil disables compaction
 	// entirely.
 	Compactor *Compactor
+
+	// Skills, if non-nil, is the discovered catalog of available skills.
+	// Skills named in ActiveSkills are loaded into the system prompt at run
+	// start; the rest become activatable via the auto-registered
+	// `activate_skill` tool. nil disables the skill system entirely.
+	Skills *skills.Catalog
+
+	// ActiveSkills is the list of skill names pre-activated for this run
+	// (e.g. from UI checkboxes or `/skill-name` slash commands in the goal).
+	// Names not present in Skills are silently dropped.
+	ActiveSkills []string
+
+	// AskUser, if non-nil, registers the ask_user tool. The agent will
+	// invoke this callback when the model wants to pause the loop and
+	// wait for human input. nil disables the ask_user tool entirely.
+	AskUser AskUserFunc
 
 	// Emit is invoked synchronously for every event. Must not block for long;
 	// the server adapter funnels into a buffered channel.
@@ -73,7 +96,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		cfg.Emit = func(Event) {}
 	}
 	if cfg.MaxIterations <= 0 {
-		cfg.MaxIterations = 25
+		// Hidden safety cap; primary control is now the agent's own todo
+		// list. High default so a normal run never trips it.
+		cfg.MaxIterations = 200
 	}
 
 	emit := cfg.Emit
@@ -103,6 +128,17 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		ltools = append(ltools, litellm.NewTool(t.Name, t.Description, t.Parameters))
 	}
 
+	// Skill bookkeeping: `active` tracks which skills have their bodies in
+	// the conversation (either via system-prompt injection or via runtime
+	// activate_skill calls). The map is shared between this function and the
+	// activate_skill tool's handler closure.
+	active := make(map[string]bool)
+	var activeMu sync.Mutex
+	preActive := dedupKnownSkills(cfg.Skills, cfg.ActiveSkills)
+	for _, n := range preActive {
+		active[n] = true
+	}
+
 	// Build the starting message list. Continue mode reuses the prior history.
 	var messages []litellm.Message
 	if len(cfg.InitialMessages) > 0 {
@@ -112,18 +148,60 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			cfg.MaxIterations, cfg.Goal,
 		)))
 	} else {
-		tmpl := prompts.NewPromptTemplate(systemPromptTmpl, []string{"workdir", "max_iter"})
+		tmpl := prompts.NewPromptTemplate(systemPromptTmpl, []string{"workdir"})
 		sysPrompt, perr := tmpl.Format(map[string]any{
-			"workdir":  cfg.Tools.Workdir(),
-			"max_iter": cfg.MaxIterations,
+			"workdir": cfg.Tools.Workdir(),
 		})
 		if perr != nil {
 			return fmt.Errorf("prompt template: %w", perr)
 		}
+		// Append active skill bodies and the catalog of activatable skills
+		// to the system prompt. Done in this order so the model first sees
+		// what's loaded, then what else is available.
+		sysPrompt += renderActiveSkillsBlock(cfg.Skills, preActive)
+		sysPrompt += renderInactiveSkillsCatalog(cfg.Skills, active)
 		messages = []litellm.Message{
 			litellm.SystemMessage(sysPrompt),
 			litellm.UserMessage("Goal: " + cfg.Goal),
 		}
+	}
+
+	// If there are inactive skills the model could load, register
+	// activate_skill. We do this only when at least one skill exists in the
+	// catalog but isn't already active — no point exposing a tool with an
+	// empty enum.
+	if cfg.Skills != nil && hasInactiveSkills(cfg.Skills, active) {
+		t := newActivateSkillTool(cfg.Skills, active, &activeMu, emit)
+		if err := cfg.Tools.Add(t); err != nil {
+			return fmt.Errorf("register activate_skill: %w", err)
+		}
+	}
+
+	// Register ask_user only when the host wired up a callback for it. CLI
+	// mode currently leaves it nil; the server provides one.
+	if cfg.AskUser != nil {
+		if err := cfg.Tools.Add(newAskUserTool(cfg.AskUser)); err != nil {
+			return fmt.Errorf("register ask_user: %w", err)
+		}
+	}
+
+	// update_todos is always available — it's the agent's plan, and the
+	// system prompt instructs the model to use it on the very first turn.
+	if err := cfg.Tools.Add(newUpdateTodosTool(emit)); err != nil {
+		return fmt.Errorf("register update_todos: %w", err)
+	}
+
+	// Emit a skill_activated event for each pre-active skill so the UI
+	// timeline reflects them just like runtime activations.
+	for _, n := range preActive {
+		sk := cfg.Skills.Get(n)
+		if sk == nil {
+			continue
+		}
+		ev := newEvent(EventSkill)
+		ev.Skill = sk.Name
+		ev.Text = sk.Description
+		emit(ev)
 	}
 
 	startEv := newEvent(EventStarted)

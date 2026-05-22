@@ -32,6 +32,19 @@ type Registry struct {
 func (r *Registry) List() []Tool   { return r.list }
 func (r *Registry) Workdir() string { return r.workdir }
 
+// Add registers an additional tool with the registry. Returns an error if the
+// name already exists — silent overwrites would mask bugs. Used by the agent
+// loop to attach session-scoped tools like activate_skill that close over
+// per-run state.
+func (r *Registry) Add(t Tool) error {
+	if _, ok := r.byName[t.Name]; ok {
+		return fmt.Errorf("tool %q already registered", t.Name)
+	}
+	r.byName[t.Name] = t
+	r.list = append(r.list, t)
+	return nil
+}
+
 func (r *Registry) Call(ctx context.Context, name, args string) (string, error) {
 	t, ok := r.byName[name]
 	if !ok {

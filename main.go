@@ -29,7 +29,7 @@ func main() {
 		host    = flag.String("host", "", "Ollama server URL (default http://localhost:11434)")
 		workdir = flag.String("workdir", ".", "Project directory the agent operates inside (CLI mode only)")
 		goal    = flag.String("goal", "", "Task for the agent (CLI mode). If empty, reads from stdin.")
-		maxIter = flag.Int("max-iter", 25, "Maximum agent iterations before giving up (CLI mode default).")
+		maxIter = flag.Int("max-iter", 200, "Hidden safety cap on iterations. Primary control is the agent's own todo list — this is just a backstop.")
 		dataDir = flag.String("data-dir", "", "Directory to persist sessions in. Default: ~/.localagent/sessions/")
 	)
 	flag.Usage = func() {
@@ -168,12 +168,32 @@ func printEvent(e agent.Event) {
 			prefix = "✗ "
 		}
 		fmt.Fprintf(os.Stderr, "%s%s\n", prefix, oneLine(e.Result))
+	case agent.EventTodoUpdate:
+		fmt.Fprintf(os.Stderr, "▤ todos (%d):\n", len(e.Todos))
+		for i, t := range e.Todos {
+			mark := "[ ]"
+			switch t.Status {
+			case agent.TodoInProgress:
+				mark = "[>]"
+			case agent.TodoCompleted:
+				mark = "[x]"
+			}
+			fmt.Fprintf(os.Stderr, "  %d. %s %s\n", i+1, mark, t.Content)
+		}
+	case agent.EventCompaction:
+		fmt.Fprintf(os.Stderr, "⌬ %s: %s\n", e.Kind, e.Text)
+	case agent.EventSkill:
+		fmt.Fprintf(os.Stderr, "✦ skill activated: %s\n", e.Skill)
+	case agent.EventQuestion:
+		fmt.Fprintf(os.Stderr, "? agent asks (no UI to answer from in CLI mode): %s\n", e.Question)
+	case agent.EventAnswer:
+		fmt.Fprintf(os.Stderr, "↳ answered: %s\n", e.Text)
 	case agent.EventDone:
 		switch e.Reason {
 		case agent.ReasonFinished:
 			fmt.Fprintf(os.Stderr, "\n✓ finished: %s\n", e.Summary)
 		case agent.ReasonMaxIter:
-			fmt.Fprintln(os.Stderr, "\n⚠ reached max iterations")
+			fmt.Fprintln(os.Stderr, "\n⚠ reached safety cap (--max-iter)")
 		case agent.ReasonCanceled:
 			fmt.Fprintln(os.Stderr, "\n⚠ canceled")
 		case agent.ReasonError:

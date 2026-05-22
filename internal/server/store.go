@@ -28,6 +28,8 @@ type StoredSession struct {
 	CompactionModel string            `json:"compaction_model,omitempty"`
 	ContextTokens   int               `json:"context_tokens,omitempty"`
 	Workdir         string            `json:"workdir"`
+	ActiveSkills    []string          `json:"active_skills,omitempty"`
+	Todos           []agent.Todo      `json:"todos,omitempty"`
 	StartedAt       time.Time         `json:"started_at"`
 	EndedAt         time.Time         `json:"ended_at,omitempty"`
 	Status          string            `json:"status"`

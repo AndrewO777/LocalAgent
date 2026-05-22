@@ -12,6 +12,7 @@ import (
 
 	"github.com/andrew/localagent/internal/agent"
 	"github.com/andrew/localagent/internal/llm"
+	"github.com/andrew/localagent/internal/skills"
 	"github.com/andrew/localagent/internal/tools"
 )
 
@@ -42,20 +43,42 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleEvents)
 	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/sessions/{id}/continue", s.handleContinueSession)
+	mux.HandleFunc("POST /api/sessions/{id}/answer", s.handleAnswer)
+	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.Handle("/", s.static)
 	return withCORS(withLogging(mux))
+}
+
+// ---- skills ---------------------------------------------------------------
+
+// handleListSkills returns the discovered skill catalog for the given
+// workdir (so the UI can render checkboxes). Bodies are omitted to keep the
+// response small. Warnings from malformed SKILL.md files are surfaced in
+// the response so the user knows why a skill they expected is missing.
+func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	workdir := strings.TrimSpace(r.URL.Query().Get("workdir"))
+	cat, warns, err := skills.Discover(workdir)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"skills":   cat.Summaries(),
+		"warnings": warns,
+	})
 }
 
 // ---- run ------------------------------------------------------------------
 
 type runRequest struct {
-	Model           string `json:"model"`
-	CompactionModel string `json:"compaction_model"`
-	Host            string `json:"host"`
-	Workdir         string `json:"workdir"`
-	Goal            string `json:"goal"`
-	MaxIterations   int    `json:"max_iterations"`
-	ContextTokens   int    `json:"context_tokens"`
+	Model           string   `json:"model"`
+	CompactionModel string   `json:"compaction_model"`
+	Host            string   `json:"host"`
+	Workdir         string   `json:"workdir"`
+	Goal            string   `json:"goal"`
+	MaxIterations   int      `json:"max_iterations"`
+	ContextTokens   int      `json:"context_tokens"`
+	Skills          []string `json:"skills"`
 }
 
 type runResponse struct {
@@ -76,8 +99,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, fmt.Errorf("model, workdir and goal are required"))
 		return
 	}
+	// Hidden safety cap. Primary control is the agent's own todo list — the
+	// UI no longer exposes this. Callers can still override via the API.
 	if req.MaxIterations <= 0 {
-		req.MaxIterations = 25
+		req.MaxIterations = 200
 	}
 	host := req.Host
 	if host == "" {
@@ -100,10 +125,19 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Skills: discover the catalog, parse `/skill-name` slash commands out
+	// of the goal, merge with checkbox-selected names. Project-local skills
+	// (in <workdir>/.localagent/skills/) and user-global skills are both
+	// surfaced.
+	cat, _, _ := skills.Discover(reg.Workdir())
+	goal, slashSkills := skills.ParseSlashCommands(req.Goal, cat)
+	activeSkills := mergeSkillNames(req.Skills, slashSkills)
+
 	// The session's context is independent of the HTTP request — the run
 	// continues even after the POST returns.
 	ctx, cancel := context.WithCancel(context.Background())
-	sess := s.mgr.Create(req.Goal, req.Model, req.CompactionModel, req.ContextTokens, reg.Workdir(), cancel)
+	sess := s.mgr.Create(goal, req.Model, req.CompactionModel, req.ContextTokens, reg.Workdir(), cancel)
+	sess.SetActiveSkills(activeSkills)
 
 	go func() {
 		defer cancel()
@@ -111,9 +145,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		runErr := agent.Run(ctx, agent.Config{
 			LLM:           client,
 			Tools:         reg,
-			Goal:          req.Goal,
+			Goal:          goal,
 			MaxIterations: req.MaxIterations,
 			Compactor:     compactor,
+			Skills:        cat,
+			ActiveSkills:  activeSkills,
+			AskUser:       buildAskUser(sess),
 			Emit:          sess.Append,
 			OnMessages:    sess.SetMessages,
 		})
@@ -185,11 +222,12 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // ---- continue -------------------------------------------------------------
 
 type continueRequest struct {
-	Goal            string `json:"goal"`
-	Host            string `json:"host"`
-	MaxIterations   int    `json:"max_iterations"`
-	CompactionModel string `json:"compaction_model"`
-	ContextTokens   int    `json:"context_tokens"`
+	Goal            string   `json:"goal"`
+	Host            string   `json:"host"`
+	MaxIterations   int      `json:"max_iterations"`
+	CompactionModel string   `json:"compaction_model"`
+	ContextTokens   int      `json:"context_tokens"`
+	Skills          []string `json:"skills"`
 }
 
 // handleContinueSession runs another agent loop on top of a finished session's
@@ -212,7 +250,7 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.MaxIterations <= 0 {
-		req.MaxIterations = 25
+		req.MaxIterations = 200
 	}
 
 	sess, ok := s.mgr.Get(id)
@@ -266,6 +304,20 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Skills for continue: discover the catalog (might have changed since
+	// last run if the user edited skills on disk), parse slash commands out
+	// of the new instruction. The continue request's skills list defaults to
+	// the session's previously active skills if not provided — most users
+	// won't want to redo their checkbox selections every time.
+	cat, _, _ := skills.Discover(sess.Workdir)
+	goal, slashSkills := skills.ParseSlashCommands(req.Goal, cat)
+	requestSkills := req.Skills
+	if requestSkills == nil {
+		requestSkills = sess.ActiveSkills()
+	}
+	activeSkills := mergeSkillNames(requestSkills, slashSkills)
+	sess.SetActiveSkills(activeSkills)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.Reopen(cancel)
 
@@ -275,10 +327,13 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		runErr := agent.Run(ctx, agent.Config{
 			LLM:             client,
 			Tools:           reg,
-			Goal:            req.Goal,
+			Goal:            goal,
 			MaxIterations:   req.MaxIterations,
 			InitialMessages: prior,
 			Compactor:       compactor,
+			Skills:          cat,
+			ActiveSkills:    activeSkills,
+			AskUser:         buildAskUser(sess),
 			Emit:            sess.Append,
 			OnMessages:      sess.SetMessages,
 		})
@@ -446,6 +501,103 @@ func (s *Server) checkContextWindow(sess *Session, comp *agent.Compactor, host, 
 		)))
 	}
 	return userCtx
+}
+
+// buildAskUser returns the closure plugged into agent.Config.AskUser. It
+// registers a per-question channel on the session, emits the question event
+// for the UI, and blocks until either the answer arrives or the run is
+// canceled. Cleanup runs in `defer` so canceled questions don't leak.
+func buildAskUser(sess *Session) agent.AskUserFunc {
+	return func(ctx context.Context, id, question string, options []string) (string, error) {
+		ch := sess.RegisterQuestion(id)
+		defer sess.UnregisterQuestion(id)
+
+		sess.Append(agent.Event{
+			Type:       agent.EventQuestion,
+			TimeMS:     time.Now().UnixMilli(),
+			QuestionID: id,
+			Question:   question,
+			Options:    options,
+		})
+
+		select {
+		case ans := <-ch:
+			sess.Append(agent.Event{
+				Type:       agent.EventAnswer,
+				TimeMS:     time.Now().UnixMilli(),
+				QuestionID: id,
+				Text:       ans,
+			})
+			return ans, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
+// ---- answer ---------------------------------------------------------------
+
+type answerRequest struct {
+	QuestionID string `json:"question_id"`
+	Answer     string `json:"answer"`
+}
+
+// handleAnswer delivers a user-supplied answer to an ask_user handler that's
+// blocked waiting for it. 404 if the session doesn't exist; 409 if the
+// question ID isn't pending (already answered, run canceled, or never
+// existed). The answer body itself is allowed to be empty — an empty
+// response is still meaningful (e.g. "proceed").
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
+	sess, ok := s.mgr.Get(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var req answerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.QuestionID = strings.TrimSpace(req.QuestionID)
+	if req.QuestionID == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("question_id is required"))
+		return
+	}
+	if !sess.Answer(req.QuestionID, req.Answer) {
+		httpError(w, http.StatusConflict, fmt.Errorf("question %q is not pending — already answered, canceled, or unknown", req.QuestionID))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// mergeSkillNames returns a deduped, order-preserving union of the two
+// input slices. Used to combine the UI checkbox selection with any slash
+// commands parsed out of the goal text.
+func mergeSkillNames(primary, secondary []string) []string {
+	seen := make(map[string]bool, len(primary)+len(secondary))
+	out := make([]string, 0, len(primary)+len(secondary))
+	for _, s := range primary {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, s := range secondary {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func warningEvent(text string) agent.Event {

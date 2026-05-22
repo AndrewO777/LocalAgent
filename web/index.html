@@ -117,6 +117,61 @@
       .event.tool_result.error { color: var(--red); border-left-color: var(--red); }
       .event.compaction { color: var(--purple); font-style: italic; padding-left: 16px; border-left: 2px dotted var(--purple); }
       .event.compaction.error { color: var(--red); border-left-color: var(--red); }
+      .event.skill_activated { color: var(--accent); padding-left: 16px; border-left: 2px solid var(--accent); }
+      .event.skill_activated .skill-name { font-weight: 700; }
+      .event.skill_activated .skill-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+      .event.question { color: var(--yellow); padding: 10px 12px; border-left: 3px solid var(--yellow); background: rgba(210, 153, 34, 0.08); border-radius: 0 6px 6px 0; margin-top: 8px; }
+      .event.question .q-label { font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; margin-bottom: 4px; }
+      .event.question .q-text { color: var(--fg); white-space: pre-wrap; }
+      .event.answer { color: var(--green); padding-left: 16px; border-left: 3px solid var(--green); white-space: pre-wrap; }
+      .event.answer .a-label { font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; margin-right: 8px; }
+
+      .prompt-box { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--yellow); padding: 12px 20px; }
+      .prompt-box .pb-question { color: var(--yellow); font-size: 12px; margin-bottom: 6px; font-weight: 600; }
+      .prompt-box .pb-row { display: flex; gap: 8px; align-items: stretch; }
+      .prompt-box textarea {
+        flex: 1; background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+        padding: 8px 10px; font: inherit; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
+        resize: vertical; min-height: 50px;
+      }
+      .prompt-box textarea:focus { outline: none; border-color: var(--yellow); }
+      .prompt-box .pb-options { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+      .prompt-box .pb-options button {
+        background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 4px;
+        padding: 4px 10px; cursor: pointer; font-size: 12px;
+      }
+      .prompt-box .pb-options button:hover { border-color: var(--yellow); color: var(--yellow); }
+      .prompt-box button.send {
+        background: var(--yellow); color: #0d1117; border: 0; border-radius: 6px; padding: 8px 16px;
+        font-weight: 600; cursor: pointer;
+      }
+      .prompt-box button.send:disabled { opacity: 0.5; cursor: not-allowed; }
+      .prompt-box .pb-error { color: var(--red); font-size: 12px; margin-top: 4px; }
+
+      .skills-block { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; }
+      .skills-block .skills-block-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+      .skills-block .skills-empty { color: var(--muted); font-size: 12px; font-style: italic; }
+      .skill-item { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; cursor: pointer; }
+      .skill-item input { margin-top: 3px; }
+      .skill-item .name { font-weight: 600; }
+      .skill-item .src { font-size: 10px; color: var(--muted); padding: 1px 4px; border: 1px solid var(--border); border-radius: 3px; margin-left: 6px; text-transform: uppercase; }
+      .skill-item .desc { color: var(--muted); font-size: 12px; line-height: 1.4; }
+      .skill-item.via-slash .name::after { content: " · /slash"; font-size: 11px; color: var(--accent); font-weight: 400; }
+
+      .todos-panel { background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 20px; }
+      .todos-panel .tp-header { display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+      .todos-panel .tp-header .tp-counts { color: var(--muted); text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
+      .todos-panel .tp-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+      .todos-panel .tp-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+      .todo-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.4; }
+      .todo-row .mark { flex: 0 0 16px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-weight: 700; }
+      .todo-row.pending .mark { color: var(--muted); }
+      .todo-row.in_progress .mark { color: var(--yellow); }
+      .todo-row.completed .mark { color: var(--green); }
+      .todo-row.completed .content { color: var(--muted); text-decoration: line-through; }
+      .todo-row.in_progress .content { color: var(--fg); font-weight: 600; }
+      .todo-row.pending .content { color: var(--fg); }
       .event.done { color: var(--green); font-weight: 700; padding-top: 14px; }
       .event.done.error { color: var(--red); }
       .event.done.canceled, .event.done.max_iter { color: var(--yellow); }
@@ -166,13 +221,16 @@
           host: localStorage.getItem("oa.host") || "",
           workdir: localStorage.getItem("oa.workdir") || ".",
           goal: "",
-          max_iterations: Number(localStorage.getItem("oa.maxIter") || 25),
           context_tokens: Number(localStorage.getItem("oa.contextTokens") || 32768),
         }));
         const [sessions, setSessions] = useState([]);
         const [current, setCurrent] = useState(null);
         // current shape: { id, goal, model, workdir, status, events, isLive }
         const [submitError, setSubmitError] = useState(null);
+        const [skillCatalog, setSkillCatalog] = useState([]); // [{name, description, source, path}]
+        const [selectedSkills, setSelectedSkills] = useState(() => {
+          try { return JSON.parse(localStorage.getItem("oa.selectedSkills") || "[]"); } catch (_) { return []; }
+        });
 
         const esRef = useRef(null);
         const eventsEndRef = useRef(null);
@@ -182,9 +240,86 @@
           localStorage.setItem("oa.compactionModel", form.compaction_model);
           localStorage.setItem("oa.host", form.host);
           localStorage.setItem("oa.workdir", form.workdir);
-          localStorage.setItem("oa.maxIter", String(form.max_iterations));
           localStorage.setItem("oa.contextTokens", String(form.context_tokens));
-        }, [form.model, form.compaction_model, form.host, form.workdir, form.max_iterations, form.context_tokens]);
+        }, [form.model, form.compaction_model, form.host, form.workdir, form.context_tokens]);
+
+        useEffect(() => {
+          localStorage.setItem("oa.selectedSkills", JSON.stringify(selectedSkills));
+        }, [selectedSkills]);
+
+        // Refresh the skill catalog whenever workdir changes — project-local
+        // skills live in <workdir>/.localagent/skills/.
+        useEffect(() => {
+          const wd = form.workdir;
+          if (!wd) { setSkillCatalog([]); return; }
+          const ac = new AbortController();
+          fetch(`/api/skills?workdir=${encodeURIComponent(wd)}`, { signal: ac.signal })
+            .then((r) => r.ok ? r.json() : { skills: [] })
+            .then((data) => setSkillCatalog(data.skills || []))
+            .catch(() => { /* ignore — directory may not exist */ });
+          return () => ac.abort();
+        }, [form.workdir]);
+
+        // Parse leading /skill-name tokens out of the goal so the UI can
+        // preview which slash-command activations will fire. Matches the
+        // server-side skills.ParseSlashCommands behaviour.
+        const slashSkillsInGoal = (() => {
+          if (!form.goal) return [];
+          const known = new Set(skillCatalog.map((s) => s.name));
+          const out = [];
+          let g = form.goal.trimStart();
+          for (let i = 0; i < 8; i++) {
+            const m = g.match(/^\/([a-z][a-z0-9-]{0,63})(?:\s+|$)/);
+            if (!m) break;
+            if (!known.has(m[1])) break;
+            if (!out.includes(m[1])) out.push(m[1]);
+            g = g.slice(m[0].length).trimStart();
+          }
+          return out;
+        })();
+
+        const effectiveSkills = (() => {
+          const seen = new Set();
+          const out = [];
+          for (const n of selectedSkills) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
+          for (const n of slashSkillsInGoal) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
+          return out;
+        })();
+
+        const toggleSkill = (name) => {
+          setSelectedSkills((prev) => prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]);
+        };
+
+        // Latest todo list: walk events backward for the most recent
+        // `todo_update` event. Falls back to session.todos (delivered via
+        // GET /api/sessions/{id} when picking a past session).
+        const currentTodos = (() => {
+          if (current?.events) {
+            for (let i = current.events.length - 1; i >= 0; i--) {
+              const e = current.events[i];
+              if (e.type === "todo_update") return e.todos || [];
+            }
+          }
+          return current?.todos || [];
+        })();
+
+        // Find the pending question (if any) in the current session's events.
+        // A question is pending if there's a `question` event whose
+        // question_id never appears in a later `answer` event.
+        const pendingQuestion = (() => {
+          if (!current?.events) return null;
+          const answered = new Set();
+          for (const e of current.events) {
+            if (e.type === "answer" && e.question_id) answered.add(e.question_id);
+          }
+          for (let i = current.events.length - 1; i >= 0; i--) {
+            const e = current.events[i];
+            if (e.type === "question" && e.question_id && !answered.has(e.question_id)) {
+              return e;
+            }
+          }
+          return null;
+        })();
 
         useEffect(() => {
           if (eventsEndRef.current) {
@@ -229,7 +364,7 @@
               });
             } catch (_) {}
           };
-          ["started", "iteration", "model_text", "tool_call", "tool_result", "compaction", "error", "done"].forEach((t) => {
+          ["started", "iteration", "model_text", "tool_call", "tool_result", "compaction", "skill_activated", "question", "answer", "todo_update", "error", "done"].forEach((t) => {
             es.addEventListener(t, handle);
           });
           es.onerror = () => { /* EventSource auto-reconnects */ };
@@ -248,8 +383,8 @@
                 host: form.host,
                 workdir: form.workdir,
                 goal: form.goal,
-                max_iterations: Number(form.max_iterations) || 25,
                 context_tokens: Number(form.context_tokens) || 0,
+                skills: effectiveSkills,
               }),
             });
             const body = await r.json();
@@ -281,9 +416,9 @@
               body: JSON.stringify({
                 goal: form.goal,
                 host: form.host,
-                max_iterations: Number(form.max_iterations) || 25,
                 compaction_model: form.compaction_model,
                 context_tokens: Number(form.context_tokens) || 0,
+                skills: effectiveSkills,
               }),
             });
             const body = await r.json();
@@ -317,6 +452,7 @@
               workdir: detail.workdir,
               status: detail.status,
               events: detail.events || [],
+              todos: detail.todos || [],
               isLive,
             });
             if (isLive) connectSSE(id);
@@ -394,14 +530,38 @@
                                 placeholder={isContinue ? "Now also add metrics for the /healthz endpoint" : "Add a /healthz endpoint and a test for it"} required />
                     </div>
                     <div className="field">
-                      <label>{isContinue ? "Additional iterations" : "Max iterations"}</label>
-                      <input type="number" min="1" max="200" value={form.max_iterations}
-                             onChange={(e) => setForm({ ...form, max_iterations: e.target.value })} />
-                    </div>
-                    <div className="field">
                       <label>Context window (tokens) <span style={{ textTransform: "none", fontWeight: 400 }}>· 0 disables compaction</span></label>
                       <input type="number" min="0" max="1000000" step="1024" value={form.context_tokens}
                              onChange={(e) => setForm({ ...form, context_tokens: e.target.value })} />
+                    </div>
+                    <div className="skills-block">
+                      <div className="skills-block-title">
+                        <span>Skills {effectiveSkills.length > 0 && `· ${effectiveSkills.length} active`}</span>
+                        <span style={{ fontSize: 10, textTransform: "none", letterSpacing: 0 }}>SKILL.md in ~/.localagent/skills or workdir/.localagent/skills</span>
+                      </div>
+                      {skillCatalog.length === 0 ? (
+                        <div className="skills-empty">No skills discovered. Drop a `SKILL.md` into <code>~/.localagent/skills/&lt;name&gt;/</code> or <code>&lt;workdir&gt;/.localagent/skills/&lt;name&gt;/</code>.</div>
+                      ) : skillCatalog.map((s) => {
+                        const viaSlash = slashSkillsInGoal.includes(s.name);
+                        const checked = selectedSkills.includes(s.name) || viaSlash;
+                        return (
+                          <label key={s.name} className={"skill-item" + (viaSlash ? " via-slash" : "")} title={s.path}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={viaSlash /* slash command forces it on */}
+                              onChange={() => toggleSkill(s.name)}
+                            />
+                            <div>
+                              <div>
+                                <span className="name">{s.name}</span>
+                                <span className="src">{s.source}</span>
+                              </div>
+                              <div className="desc">{s.description}</div>
+                            </div>
+                          </label>
+                        );
+                      })}
                     </div>
                     {submitError && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 10 }}>{submitError}</div>}
                     {current?.isLive ? (
@@ -470,6 +630,7 @@
                       <code title={current.id}>{current.id.slice(0, 8)}</code>
                     </div>
                   </div>
+                  <TodosPanel todos={currentTodos} />
                   <div className="events">
                     {current.events.length === 0 ? (
                       <div className="empty">Waiting for first event…</div>
@@ -478,6 +639,12 @@
                     )}
                     <div ref={eventsEndRef} />
                   </div>
+                  {pendingQuestion && (
+                    <PromptBox
+                      sessionId={current.id}
+                      question={pendingQuestion}
+                    />
+                  )}
                 </>
               ) : (
                 <div className="events">
@@ -489,6 +656,128 @@
               )}
             </main>
           </div>
+        );
+      }
+
+      function TodosPanel({ todos }) {
+        const [collapsed, setCollapsed] = useState(false);
+        const counts = todos.reduce((acc, t) => {
+          acc[t.status] = (acc[t.status] || 0) + 1;
+          return acc;
+        }, {});
+        const total = todos.length;
+        const done = counts.completed || 0;
+        return (
+          <div className="todos-panel">
+            <div className="tp-header" onClick={() => setCollapsed(!collapsed)} title="Click to collapse/expand">
+              <span>{collapsed ? "▸" : "▾"} Todos</span>
+              <span className="tp-counts">
+                {total === 0 ? "no plan yet" : `${done}/${total} complete`}
+              </span>
+            </div>
+            {!collapsed && (
+              total === 0 ? (
+                <div className="tp-empty">Agent hasn't planned yet. The first action of the run should be a call to <code>update_todos</code>.</div>
+              ) : (
+                <div className="tp-list">
+                  {todos.map((t, i) => (
+                    <div key={i} className={"todo-row " + t.status}>
+                      <span className="mark">
+                        {t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"}
+                      </span>
+                      <span className="content">{t.content}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        );
+      }
+
+      function PromptBox({ sessionId, question }) {
+        const [text, setText] = useState("");
+        const [sending, setSending] = useState(false);
+        const [err, setErr] = useState(null);
+        const taRef = useRef(null);
+
+        useEffect(() => {
+          // Auto-focus the textarea whenever a new question appears.
+          taRef.current?.focus();
+          setText("");
+          setErr(null);
+        }, [question?.question_id]);
+
+        const send = async (answerText) => {
+          setSending(true);
+          setErr(null);
+          try {
+            const r = await fetch(`/api/sessions/${sessionId}/answer`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                question_id: question.question_id,
+                answer: answerText,
+              }),
+            });
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}));
+              throw new Error(body.error || `HTTP ${r.status}`);
+            }
+            setText("");
+            // The agent's next event-stream update will include the
+            // `answer` event, which makes pendingQuestion null and unmounts
+            // this component. No further cleanup needed here.
+          } catch (e) {
+            setErr(String(e.message || e));
+          } finally {
+            setSending(false);
+          }
+        };
+
+        const onSubmit = (e) => {
+          e.preventDefault();
+          if (!sending) send(text);
+        };
+
+        const onKeyDown = (e) => {
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !sending) {
+            e.preventDefault();
+            send(text);
+          }
+        };
+
+        return (
+          <form className="prompt-box" onSubmit={onSubmit}>
+            <div className="pb-question">Agent is waiting for your answer.</div>
+            {question.options && question.options.length > 0 && (
+              <div className="pb-options">
+                {question.options.map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    disabled={sending}
+                    onClick={() => send(opt)}
+                    title={`Send "${opt}" as the answer`}
+                  >{opt}</button>
+                ))}
+              </div>
+            )}
+            <div className="pb-row">
+              <textarea
+                ref={taRef}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Your answer… (Ctrl/⌘+Enter to send)"
+                disabled={sending}
+              />
+              <button type="submit" className="send" disabled={sending}>
+                {sending ? "…" : "Send"}
+              </button>
+            </div>
+            {err && <div className="pb-error">{err}</div>}
+          </form>
         );
       }
 
@@ -524,6 +813,35 @@
             return (
               <div className={"event compaction" + (ev.is_error ? " error" : "")}>
                 ⌬ {ev.kind}: {ev.text}{arrow}
+              </div>
+            );
+          }
+          case "skill_activated":
+            return (
+              <div className="event skill_activated">
+                ✦ skill activated: <span className="skill-name">{ev.skill}</span>
+                {ev.text && <div className="skill-desc">{ev.text}</div>}
+              </div>
+            );
+          case "question":
+            return (
+              <div className="event question">
+                <div className="q-label">? agent asks</div>
+                <div className="q-text">{ev.question}</div>
+              </div>
+            );
+          case "answer":
+            return (
+              <div className="event answer">
+                <span className="a-label">↳ you</span>{ev.text || <em style={{ color: "var(--muted)" }}>(empty)</em>}
+              </div>
+            );
+          case "todo_update": {
+            const n = (ev.todos || []).length;
+            const done = (ev.todos || []).filter((t) => t.status === "completed").length;
+            return (
+              <div className="event compaction" title="See the Todos panel above for the current plan">
+                ▤ todos updated ({done}/{n} complete)
               </div>
             );
           }

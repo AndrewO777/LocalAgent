@@ -20,14 +20,16 @@ func IsValidID(id string) bool { return validIDRe.MatchString(id) }
 
 // Summary is the lightweight view of a session used in list responses.
 type Summary struct {
-	ID         string    `json:"id"`
-	Goal       string    `json:"goal"`
-	Model      string    `json:"model"`
-	Workdir    string    `json:"workdir"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at,omitempty"`
-	Status     string    `json:"status"`
-	EventCount int       `json:"event_count"`
+	ID           string       `json:"id"`
+	Goal         string       `json:"goal"`
+	Model        string       `json:"model"`
+	Workdir      string       `json:"workdir"`
+	StartedAt    time.Time    `json:"started_at"`
+	EndedAt      time.Time    `json:"ended_at,omitempty"`
+	Status       string       `json:"status"`
+	EventCount   int          `json:"event_count"`
+	ActiveSkills []string     `json:"active_skills,omitempty"`
+	Todos        []agent.Todo `json:"todos,omitempty"`
 }
 
 // Session holds the per-run state: a buffered history of events plus active
@@ -40,16 +42,104 @@ type Session struct {
 	ContextTokens   int
 	Workdir         string
 
-	mu          sync.Mutex
-	startedAt   time.Time
-	endedAt     time.Time
-	status      string // running | finished | error | canceled | max_iter | unknown
-	history     []agent.Event
-	messages    []litellm.Message
-	subscribers []chan agent.Event
-	done        bool
-	cancel      context.CancelFunc
-	store       *FileStore
+	mu               sync.Mutex
+	activeSkills     []string // skill names active at the most recent run start
+	todos            []agent.Todo // latest plan emitted by update_todos
+	startedAt        time.Time
+	endedAt          time.Time
+	status           string // running | finished | error | canceled | max_iter | unknown
+	history          []agent.Event
+	messages         []litellm.Message
+	subscribers      []chan agent.Event
+	done             bool
+	cancel           context.CancelFunc
+	pendingQuestions map[string]chan string // question_id -> 1-buffered answer channel
+	store            *FileStore
+}
+
+// Todos returns a defensive copy of the session's latest todo list.
+func (s *Session) Todos() []agent.Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agent.Todo(nil), s.todos...)
+}
+
+// --- ask_user wiring -------------------------------------------------------
+
+// RegisterQuestion creates a 1-buffered channel under the given question ID
+// and returns it. The caller (ask_user tool handler) waits on this channel
+// for the user's answer. Caller MUST call UnregisterQuestion when done,
+// typically via defer, so canceled / abandoned questions don't leak.
+func (s *Session) RegisterQuestion(id string) chan string {
+	ch := make(chan string, 1)
+	s.mu.Lock()
+	if s.pendingQuestions == nil {
+		s.pendingQuestions = make(map[string]chan string)
+	}
+	s.pendingQuestions[id] = ch
+	s.mu.Unlock()
+	return ch
+}
+
+// UnregisterQuestion removes a question from the pending map. Safe to call
+// after Answer (no-op).
+func (s *Session) UnregisterQuestion(id string) {
+	s.mu.Lock()
+	delete(s.pendingQuestions, id)
+	s.mu.Unlock()
+}
+
+// Answer delivers a user-supplied answer to a waiting ask_user handler.
+// Returns false if the question_id isn't pending (already answered, canceled,
+// or unknown). The send is non-blocking because the channel is 1-buffered
+// and no other writer exists; double-answer attempts are ignored.
+func (s *Session) Answer(id, answer string) bool {
+	s.mu.Lock()
+	ch, ok := s.pendingQuestions[id]
+	if ok {
+		delete(s.pendingQuestions, id)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- answer:
+		return true
+	default:
+		// Reader already gone (handler canceled). Treat as no-op rather
+		// than blocking forever.
+		return false
+	}
+}
+
+// PendingQuestions returns the IDs of questions currently awaiting an
+// answer. Useful for the UI when reconnecting via SSE replay — clients
+// can decide whether to show the prompt input.
+func (s *Session) PendingQuestions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.pendingQuestions))
+	for id := range s.pendingQuestions {
+		out = append(out, id)
+	}
+	return out
+}
+
+// ActiveSkills returns a defensive copy of the skill names active at the
+// most recent run start. Safe to call from any goroutine.
+func (s *Session) ActiveSkills() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.activeSkills...)
+}
+
+// SetActiveSkills replaces the active-skills list. Called by the run /
+// continue handlers right before agent.Run launches.
+func (s *Session) SetActiveSkills(names []string) {
+	s.mu.Lock()
+	s.activeSkills = append([]string(nil), names...)
+	s.mu.Unlock()
 }
 
 // Messages returns a defensive copy of the current LLM conversation.
@@ -76,6 +166,9 @@ func (s *Session) Reopen(newCancel context.CancelFunc) {
 	s.status = "running"
 	s.endedAt = time.Time{}
 	s.cancel = newCancel
+	// A new run starts with no questions pending — defensive in case a
+	// prior run leaked a registration somehow.
+	s.pendingQuestions = make(map[string]chan string)
 }
 
 // SanitizeMessagesForContinue trims a conversation back to its last
@@ -110,7 +203,8 @@ func SanitizeMessagesForContinue(msgs []litellm.Message) []litellm.Message {
 func (s *Session) Append(e agent.Event) {
 	s.mu.Lock()
 	s.history = append(s.history, e)
-	if e.Type == agent.EventDone {
+	switch e.Type {
+	case agent.EventDone:
 		s.done = true
 		s.endedAt = time.UnixMilli(e.TimeMS)
 		if e.Reason != "" {
@@ -118,6 +212,10 @@ func (s *Session) Append(e agent.Event) {
 		} else {
 			s.status = "unknown"
 		}
+	case agent.EventTodoUpdate:
+		// Capture the latest plan so /api/sessions/{id} can return it
+		// without having to scan history.
+		s.todos = append([]agent.Todo(nil), e.Todos...)
 	}
 	subs := append([]chan agent.Event(nil), s.subscribers...)
 	doneFlag := s.done
@@ -217,14 +315,16 @@ func (s *Session) Summary() Summary {
 		}
 	}
 	return Summary{
-		ID:         s.ID,
-		Goal:       s.Goal,
-		Model:      s.Model,
-		Workdir:    s.Workdir,
-		StartedAt:  s.startedAt,
-		EndedAt:    s.endedAt,
-		Status:     status,
-		EventCount: len(s.history),
+		ID:           s.ID,
+		Goal:         s.Goal,
+		Model:        s.Model,
+		Workdir:      s.Workdir,
+		StartedAt:    s.startedAt,
+		EndedAt:      s.endedAt,
+		Status:       status,
+		EventCount:   len(s.history),
+		ActiveSkills: append([]string(nil), s.activeSkills...),
+		Todos:        append([]agent.Todo(nil), s.todos...),
 	}
 }
 
@@ -238,6 +338,8 @@ func (s *Session) toStored() StoredSession {
 		CompactionModel: s.CompactionModel,
 		ContextTokens:   s.ContextTokens,
 		Workdir:         s.Workdir,
+		ActiveSkills:    append([]string(nil), s.activeSkills...),
+		Todos:           append([]agent.Todo(nil), s.todos...),
 		StartedAt:       s.startedAt,
 		EndedAt:         s.endedAt,
 		Status:          s.status,
@@ -256,6 +358,8 @@ func sessionFromStored(ss *StoredSession) *Session {
 		CompactionModel: ss.CompactionModel,
 		ContextTokens:   ss.ContextTokens,
 		Workdir:         ss.Workdir,
+		activeSkills:    ss.ActiveSkills,
+		todos:           ss.Todos,
 		startedAt:       ss.StartedAt,
 		endedAt:         ss.EndedAt,
 		status:          ss.Status,
@@ -360,14 +464,16 @@ func (m *Manager) Summaries() []Summary {
 				continue
 			}
 			out = append(out, Summary{
-				ID:         ss.ID,
-				Goal:       ss.Goal,
-				Model:      ss.Model,
-				Workdir:    ss.Workdir,
-				StartedAt:  ss.StartedAt,
-				EndedAt:    ss.EndedAt,
-				Status:     ss.Status,
-				EventCount: len(ss.Events),
+				ID:           ss.ID,
+				Goal:         ss.Goal,
+				Model:        ss.Model,
+				Workdir:      ss.Workdir,
+				StartedAt:    ss.StartedAt,
+				EndedAt:      ss.EndedAt,
+				Status:       ss.Status,
+				EventCount:   len(ss.Events),
+				ActiveSkills: ss.ActiveSkills,
+				Todos:        ss.Todos,
 			})
 		}
 	}
