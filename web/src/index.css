@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base look-and-feel that doesn't fit neatly into a per-component utility. */
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full m-0;
+  }
+
+  body {
+    @apply bg-bg text-fg font-sans text-sm;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+}
+
+/* Small reusable bits that would be too noisy at the call site. */
+@layer components {
+  .field-label {
+    @apply text-xs font-semibold text-muted uppercase tracking-wider mb-1.5;
+  }
+
+  .field-input {
+    @apply bg-panel-2 text-fg border border-border rounded-md px-2.5 py-2 font-mono text-[13px] focus:outline-none focus:border-accent;
+  }
+}

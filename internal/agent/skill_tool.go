@@ -25,10 +25,11 @@ import (
 // so the activation persists for the run (and survives /continue because we
 // persist messages).
 //
-// `inactive` is the list of skill names not yet active when the catalog was
-// presented to the model. It's used for both the tool's description (so the
-// model knows what's available) and for input validation. New activations
-// mutate `active` under `mu`.
+// The tool's description embeds the full catalog (every skill in `cat`)
+// annotated with each one's current state ("available" vs "already active")
+// so the model has the names + descriptions it needs to pick one. The
+// `enum` constraint on `skill_name` mirrors the catalog so the model can't
+// invent a name.
 func newActivateSkillTool(cat *skills.Catalog, active map[string]bool, mu *sync.Mutex, emit func(Event)) tools.Tool {
 	// Build the menu shown in the tool description so the model knows what
 	// names are valid. We list every catalog entry, marking active ones.

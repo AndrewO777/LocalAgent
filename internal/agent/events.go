@@ -16,7 +16,7 @@ const (
 	EventQuestion   EventType = "question"
 	EventAnswer     EventType = "answer"
 	EventTodoUpdate EventType = "todo_update"
-	EventError      EventType = "error"
+	EventUserMsg    EventType = "user_message"
 	EventDone       EventType = "done"
 )
 

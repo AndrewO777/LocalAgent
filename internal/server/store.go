@@ -28,6 +28,7 @@ type StoredSession struct {
 	CompactionModel string            `json:"compaction_model,omitempty"`
 	ContextTokens   int               `json:"context_tokens,omitempty"`
 	Workdir         string            `json:"workdir"`
+	Host            string            `json:"host,omitempty"`
 	ActiveSkills    []string          `json:"active_skills,omitempty"`
 	Todos           []agent.Todo      `json:"todos,omitempty"`
 	StartedAt       time.Time         `json:"started_at"`
@@ -129,7 +130,10 @@ func (s *FileStore) List() ([]StoredSession, error) {
 	out := make([]StoredSession, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+		// We only want completed atomic writes — those end in `.json`.
+		// In-flight writes use `<id>.json.tmp` which fails the `.json`
+		// suffix check, so they're naturally excluded.
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		sess, err := s.loadFile(filepath.Join(s.dir, name))

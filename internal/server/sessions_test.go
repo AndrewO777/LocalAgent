@@ -110,3 +110,35 @@ func TestSession_ReopenClearsPending(t *testing.T) {
 		t.Fatalf("Reopen should clear pendingQuestions, got %v", s.PendingQuestions())
 	}
 }
+
+// --- inject queue ----------------------------------------------------------
+
+func TestSession_InjectAndDrain(t *testing.T) {
+	s := &Session{}
+	s.Inject("hello")
+	s.Inject("more context")
+	got := s.DrainInjections()
+	if len(got) != 2 || got[0] != "hello" || got[1] != "more context" {
+		t.Fatalf("unexpected drain result: %v", got)
+	}
+	// Second drain returns empty — queue was cleared.
+	if got := s.DrainInjections(); len(got) != 0 {
+		t.Fatalf("second drain should be empty, got %v", got)
+	}
+}
+
+func TestSession_DrainEmptyQueueIsSafe(t *testing.T) {
+	s := &Session{}
+	if got := s.DrainInjections(); len(got) != 0 {
+		t.Fatalf("empty session should drain to empty, got %v", got)
+	}
+}
+
+func TestSession_ReopenClearsInjections(t *testing.T) {
+	s := &Session{}
+	s.Inject("queued for previous run")
+	s.Reopen(nil)
+	if got := s.DrainInjections(); len(got) != 0 {
+		t.Fatalf("Reopen should drop pending injections, got %v", got)
+	}
+}

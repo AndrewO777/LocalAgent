@@ -43,7 +43,8 @@ Constraints:
 - All paths are relative to the project root. Absolute paths and paths escaping the root are rejected.
 - Each tool call should make progress. Do not call the same tool with the same arguments twice in a row.
 - run_command waits for the command to exit. Do NOT start dev servers or watch processes (npm run dev, npx vite, anything with --watch) — they will hit the timeout and be killed. To verify code runs, use one-shot commands that exit on their own: npm test, npm run build, go build ./..., go test ./..., etc.
-- Exactly one todo should be in_progress at a time. Mark a todo completed only when it is fully done (file written AND verified by a command where applicable).`
+- Exactly one todo should be in_progress at a time. Mark a todo completed only when it is fully done (file written AND verified by a command where applicable).
+- IMPORTANT: if you have a question for the user, you MUST call the ask_user tool. Writing a question in your free-text response does NOT reach the user — that text is internal reasoning only, never delivered. Skills that say things like "ask the user" or "wait for confirmation" mean: call ask_user. The loop will pause until the user answers.`
 
 // Config controls one agent run.
 type Config struct {
@@ -77,6 +78,13 @@ type Config struct {
 	// invoke this callback when the model wants to pause the loop and
 	// wait for human input. nil disables the ask_user tool entirely.
 	AskUser AskUserFunc
+
+	// PullUserInjections, if non-nil, is called at the top of every
+	// iteration. Any returned strings are appended to the conversation as
+	// user messages BEFORE the next LLM call, so the user can steer or
+	// add context without canceling the run. The server populates this
+	// with sess.DrainInjections.
+	PullUserInjections func() []string
 
 	// Emit is invoked synchronously for every event. Must not block for long;
 	// the server adapter funnels into a buffered channel.
@@ -139,10 +147,33 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		active[n] = true
 	}
 
-	// Build the starting message list. Continue mode reuses the prior history.
+	// Build the starting message list. Continue mode reuses the prior
+	// history; fresh mode builds a system prompt from scratch.
+	//
+	// Skill-injection rule (applies to both modes):
+	//   - Fresh: pre-active bodies go into the system prompt; the catalog
+	//     of remaining skills goes there too so the model knows what it
+	//     can activate.
+	//   - Continue: the system prompt from the prior run already exists in
+	//     InitialMessages. New skills selected for THIS run (via UI or
+	//     /slash) wouldn't otherwise reach the model — we append their
+	//     bodies as a user message before the continuation prompt so they
+	//     take effect immediately.
 	var messages []litellm.Message
+	var skillInjectionApplied []string // skill names whose bodies actually entered the conversation
 	if len(cfg.InitialMessages) > 0 {
 		messages = append([]litellm.Message(nil), cfg.InitialMessages...)
+		// Re-inject the active skill block on every continue. The model
+		// sees it as fresh user-provided context — redundant if the
+		// skill was already in the prior system prompt, but harmless
+		// (LLMs tolerate restated instructions) and necessary when a
+		// skill was newly activated for the continuation.
+		if block := renderActiveSkillsBlock(cfg.Skills, preActive); block != "" {
+			messages = append(messages, litellm.UserMessage(
+				"[continuing session — re-asserting active skills]"+block,
+			))
+			skillInjectionApplied = preActive
+		}
 		messages = append(messages, litellm.UserMessage(fmt.Sprintf(
 			"Continuing the previous session. You have up to %d more iterations. New instruction: %s",
 			cfg.MaxIterations, cfg.Goal,
@@ -164,6 +195,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			litellm.SystemMessage(sysPrompt),
 			litellm.UserMessage("Goal: " + cfg.Goal),
 		}
+		skillInjectionApplied = preActive
 	}
 
 	// If there are inactive skills the model could load, register
@@ -191,9 +223,11 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return fmt.Errorf("register update_todos: %w", err)
 	}
 
-	// Emit a skill_activated event for each pre-active skill so the UI
-	// timeline reflects them just like runtime activations.
-	for _, n := range preActive {
+	// Emit a skill_activated event for each pre-active skill whose body
+	// was actually embedded. On continue, the renderActiveSkillsBlock can
+	// be empty (no active skills) — in that case we don't claim to have
+	// activated anything.
+	for _, n := range skillInjectionApplied {
 		sk := cfg.Skills.Get(n)
 		if sk == nil {
 			continue
@@ -224,6 +258,23 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		iterEv.Iter = iter
 		emit(iterEv)
 
+		// Drain any user-typed messages and append them to the conversation
+		// before the next LLM call. Lets the user steer mid-run without
+		// canceling. Emits a `user_message` event per injection so the
+		// timeline reflects what the user said.
+		if cfg.PullUserInjections != nil {
+			for _, msg := range cfg.PullUserInjections() {
+				msg = strings.TrimSpace(msg)
+				if msg == "" {
+					continue
+				}
+				messages = append(messages, litellm.UserMessage("[User interjected mid-run]: "+msg))
+				userEv := newEvent(EventUserMsg)
+				userEv.Text = msg
+				emit(userEv)
+			}
+		}
+
 		content, toolCalls, streamErr := streamOne(ctx, cfg.LLM, &litellm.Request{
 			Model:       cfg.LLM.Model,
 			Messages:    messages,
@@ -244,9 +295,15 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		// No tool calls: nudge the model once. If it persists, the iteration
 		// budget will run out — preferable to looping forever silently.
 		if len(toolCalls) == 0 {
+			nudge := "You must either call a tool to make progress, or call finish if the goal is complete."
+			if cfg.AskUser != nil && endsWithUserQuestion(content) {
+				// Model wrote a question in its text response. Without an
+				// ask_user call, that question never reaches the human.
+				nudge += " Your message looks like a question for the user — questions in free text are NOT delivered. Call ask_user(question, options?) to actually reach them, or proceed without their input."
+			}
 			messages = append(messages,
 				litellm.Message{Role: "assistant", Content: content},
-				litellm.UserMessage("You must either call a tool to make progress, or call finish if the goal is complete."),
+				litellm.UserMessage(nudge),
 			)
 			snapshot()
 			continue
@@ -258,6 +315,16 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			Content:   content,
 			ToolCalls: toolCalls,
 		})
+
+		// If the model wrote a question in its text but also called other
+		// tools (not ask_user), it's about to march on without the user's
+		// answer. Inject a corrective system note so the next iteration
+		// either calls ask_user or stops asking rhetorical questions.
+		if cfg.AskUser != nil && endsWithUserQuestion(content) && !containsToolCall(toolCalls, "ask_user") {
+			messages = append(messages, litellm.UserMessage(
+				"[system note] Your previous message ended with a question, but you didn't call ask_user — the user does not see that question. If you genuinely need their input, call ask_user(question, options?) now. If you can decide for yourself, continue without asking.",
+			))
+		}
 
 		// Execute every tool call the model issued this turn.
 		for _, tc := range toolCalls {
@@ -298,6 +365,42 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		snapshot()
 	}
 	return fmt.Errorf("reached max iterations (%d) without finishing", cfg.MaxIterations)
+}
+
+// endsWithUserQuestion reports whether the model's text output reads like a
+// question intended for the user (so the loop knows to nudge the model
+// toward ask_user instead of marching on). The heuristic: after stripping
+// trailing whitespace and a few markdown decorations, the very last
+// character is `?`. This catches the common failure mode where a small
+// local model writes "Should I do X or Y?" in its free text instead of
+// calling ask_user.
+//
+// False positives are tolerable (the nudge is cheap and the model can
+// ignore it). False negatives mean the user gets ignored — which is what
+// we're trying to fix — so a permissive heuristic is the right trade-off.
+func endsWithUserQuestion(content string) bool {
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return false
+	}
+	// Strip trailing markdown emphasis / quote punctuation that sometimes
+	// follows the actual sentence-ending punctuation.
+	s = strings.TrimRight(s, "*_`\"')]}>")
+	if s == "" {
+		return false
+	}
+	return s[len(s)-1] == '?'
+}
+
+// containsToolCall reports whether any of the tool calls in tcs has the
+// given function name.
+func containsToolCall(tcs []litellm.ToolCall, name string) bool {
+	for _, tc := range tcs {
+		if tc.Function.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // streamOne issues a single Stream call and accumulates content + tool calls

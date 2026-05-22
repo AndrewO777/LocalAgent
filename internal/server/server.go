@@ -44,6 +44,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/sessions/{id}/continue", s.handleContinueSession)
 	mux.HandleFunc("POST /api/sessions/{id}/answer", s.handleAnswer)
+	mux.HandleFunc("POST /api/sessions/{id}/inject", s.handleInject)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.Handle("/", s.static)
 	return withCORS(withLogging(mux))
@@ -95,10 +96,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	req.CompactionModel = strings.TrimSpace(req.CompactionModel)
 	req.Workdir = strings.TrimSpace(req.Workdir)
 	req.Goal = strings.TrimSpace(req.Goal)
-	if req.Model == "" || req.Workdir == "" || req.Goal == "" {
-		httpError(w, http.StatusBadRequest, fmt.Errorf("model, workdir and goal are required"))
+	if req.Model == "" || req.Workdir == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("model and workdir are required"))
 		return
 	}
+	// Goal validation is deferred until after slash-command stripping below
+	// — a goal of just `/skill-name` is meaningful (the skill instructs the
+	// agent) but strips to empty, so we can't reject empty here.
 	// Hidden safety cap. Primary control is the agent's own todo list — the
 	// UI no longer exposes this. Callers can still override via the API.
 	if req.MaxIterations <= 0 {
@@ -133,26 +137,38 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	goal, slashSkills := skills.ParseSlashCommands(req.Goal, cat)
 	activeSkills := mergeSkillNames(req.Skills, slashSkills)
 
+	// Goal can be empty *only* if the user supplied at least one skill
+	// (either via /slash or checkbox) — the skill body provides the
+	// instruction in that case. Otherwise we have nothing for the agent.
+	if strings.TrimSpace(goal) == "" && len(activeSkills) == 0 {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("goal is required (or activate a skill that provides instructions)"))
+		return
+	}
+
 	// The session's context is independent of the HTTP request — the run
-	// continues even after the POST returns.
+	// continues even after the POST returns. We persist `host` on the
+	// session so /continue can default to it instead of falling back to
+	// s.defaultHost (which silently breaks remote-host runs when the UI's
+	// form.host gets cleared between turns).
 	ctx, cancel := context.WithCancel(context.Background())
-	sess := s.mgr.Create(goal, req.Model, req.CompactionModel, req.ContextTokens, reg.Workdir(), cancel)
+	sess := s.mgr.Create(goal, req.Model, req.CompactionModel, req.ContextTokens, reg.Workdir(), host, cancel)
 	sess.SetActiveSkills(activeSkills)
 
 	go func() {
 		defer cancel()
 		s.checkContextWindow(sess, compactor, host, req.Model, req.ContextTokens)
 		runErr := agent.Run(ctx, agent.Config{
-			LLM:           client,
-			Tools:         reg,
-			Goal:          goal,
-			MaxIterations: req.MaxIterations,
-			Compactor:     compactor,
-			Skills:        cat,
-			ActiveSkills:  activeSkills,
-			AskUser:       buildAskUser(sess),
-			Emit:          sess.Append,
-			OnMessages:    sess.SetMessages,
+			LLM:                client,
+			Tools:              reg,
+			Goal:               goal,
+			MaxIterations:      req.MaxIterations,
+			Compactor:          compactor,
+			Skills:             cat,
+			ActiveSkills:       activeSkills,
+			AskUser:            buildAskUser(sess),
+			PullUserInjections: sess.DrainInjections,
+			Emit:               sess.Append,
+			OnMessages:         sess.SetMessages,
 		})
 		// Run always emits a terminal Done event for the normal happy/cancel
 		// paths. If something escaped without one, synthesise it here so
@@ -245,10 +261,8 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
-	if req.Goal == "" {
-		httpError(w, http.StatusBadRequest, fmt.Errorf("goal is required"))
-		return
-	}
+	// Empty goal is rejected unless slash-commands turn it into pure
+	// skill activation — checked below after we know the catalog.
 	if req.MaxIterations <= 0 {
 		req.MaxIterations = 200
 	}
@@ -273,7 +287,17 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := req.Host
+	// Host preference order on continue:
+	//   1. Explicit override in this request's body.
+	//   2. The host the original run used (stored on the session).
+	//   3. The server's default host.
+	// Step 2 is the important one — without it, a session that ran against
+	// a remote Ollama silently retargets the local default on continue and
+	// fails with "model not found" on the local server.
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		host = sess.Host
+	}
 	if host == "" {
 		host = s.defaultHost
 	}
@@ -316,6 +340,15 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		requestSkills = sess.ActiveSkills()
 	}
 	activeSkills := mergeSkillNames(requestSkills, slashSkills)
+
+	// Continue allows a pure-skill activation goal (e.g. "/wnp-loop")
+	// just like fresh run; reject only if there's neither goal text nor
+	// an active skill that can carry the instruction.
+	if strings.TrimSpace(goal) == "" && len(activeSkills) == 0 {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("goal is required (or activate a skill that provides instructions)"))
+		return
+	}
+
 	sess.SetActiveSkills(activeSkills)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -325,17 +358,18 @@ func (s *Server) handleContinueSession(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		s.checkContextWindow(sess, compactor, host, sess.Model, contextTokens)
 		runErr := agent.Run(ctx, agent.Config{
-			LLM:             client,
-			Tools:           reg,
-			Goal:            goal,
-			MaxIterations:   req.MaxIterations,
-			InitialMessages: prior,
-			Compactor:       compactor,
-			Skills:          cat,
-			ActiveSkills:    activeSkills,
-			AskUser:         buildAskUser(sess),
-			Emit:            sess.Append,
-			OnMessages:      sess.SetMessages,
+			LLM:                client,
+			Tools:              reg,
+			Goal:               goal,
+			MaxIterations:      req.MaxIterations,
+			InitialMessages:    prior,
+			Compactor:          compactor,
+			Skills:             cat,
+			ActiveSkills:       activeSkills,
+			AskUser:            buildAskUser(sess),
+			PullUserInjections: sess.DrainInjections,
+			Emit:               sess.Append,
+			OnMessages:         sess.SetMessages,
 		})
 		if runErr != nil && !sess.Done() {
 			sess.Append(agent.Event{
@@ -572,6 +606,46 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, fmt.Errorf("question %q is not pending — already answered, canceled, or unknown", req.QuestionID))
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---- inject ---------------------------------------------------------------
+
+type injectRequest struct {
+	Message string `json:"message"`
+}
+
+// handleInject queues a user-typed message to be appended to the agent's
+// conversation at the start of its next iteration. Unlike /answer (which
+// unblocks a specific pending ask_user call), inject is a fire-and-forget
+// side channel — the user can send guidance any time during a live run.
+// 409 if the session is finished (nothing to inject into).
+func (s *Server) handleInject(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !IsValidID(id) {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
+	sess, ok := s.mgr.Get(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if sess.Done() {
+		httpError(w, http.StatusConflict, fmt.Errorf("session is finished — start a new run or use /continue"))
+		return
+	}
+	var req injectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("message is required"))
+		return
+	}
+	sess.Inject(msg)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

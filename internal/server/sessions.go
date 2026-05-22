@@ -24,6 +24,7 @@ type Summary struct {
 	Goal         string       `json:"goal"`
 	Model        string       `json:"model"`
 	Workdir      string       `json:"workdir"`
+	Host         string       `json:"host,omitempty"`
 	StartedAt    time.Time    `json:"started_at"`
 	EndedAt      time.Time    `json:"ended_at,omitempty"`
 	Status       string       `json:"status"`
@@ -41,20 +42,44 @@ type Session struct {
 	CompactionModel string
 	ContextTokens   int
 	Workdir         string
+	Host            string // Ollama base URL used for the original run; continue defaults to this
 
-	mu               sync.Mutex
-	activeSkills     []string // skill names active at the most recent run start
-	todos            []agent.Todo // latest plan emitted by update_todos
-	startedAt        time.Time
-	endedAt          time.Time
-	status           string // running | finished | error | canceled | max_iter | unknown
-	history          []agent.Event
-	messages         []litellm.Message
-	subscribers      []chan agent.Event
-	done             bool
-	cancel           context.CancelFunc
-	pendingQuestions map[string]chan string // question_id -> 1-buffered answer channel
-	store            *FileStore
+	mu                sync.Mutex
+	activeSkills      []string     // skill names active at the most recent run start
+	todos             []agent.Todo // latest plan emitted by update_todos
+	startedAt         time.Time
+	endedAt           time.Time
+	status            string // running | finished | error | canceled | max_iter | unknown
+	history           []agent.Event
+	messages          []litellm.Message
+	subscribers       []chan agent.Event
+	done              bool
+	cancel            context.CancelFunc
+	pendingQuestions  map[string]chan string // question_id -> 1-buffered answer channel
+	pendingInjections []string               // user messages queued while a run is live
+	store             *FileStore
+}
+
+// --- user injection wiring -------------------------------------------------
+
+// Inject queues a user-supplied message to be appended to the agent's
+// conversation at the start of its next iteration. Safe to call from any
+// goroutine; non-blocking.
+func (s *Session) Inject(msg string) {
+	s.mu.Lock()
+	s.pendingInjections = append(s.pendingInjections, msg)
+	s.mu.Unlock()
+}
+
+// DrainInjections returns all queued user messages and clears the queue. The
+// agent loop calls this once per iteration to pull anything the user typed
+// since the last turn.
+func (s *Session) DrainInjections() []string {
+	s.mu.Lock()
+	out := s.pendingInjections
+	s.pendingInjections = nil
+	s.mu.Unlock()
+	return out
 }
 
 // Todos returns a defensive copy of the session's latest todo list.
@@ -169,6 +194,7 @@ func (s *Session) Reopen(newCancel context.CancelFunc) {
 	// A new run starts with no questions pending — defensive in case a
 	// prior run leaked a registration somehow.
 	s.pendingQuestions = make(map[string]chan string)
+	s.pendingInjections = nil
 }
 
 // SanitizeMessagesForContinue trims a conversation back to its last
@@ -319,6 +345,7 @@ func (s *Session) Summary() Summary {
 		Goal:         s.Goal,
 		Model:        s.Model,
 		Workdir:      s.Workdir,
+		Host:         s.Host,
 		StartedAt:    s.startedAt,
 		EndedAt:      s.endedAt,
 		Status:       status,
@@ -338,6 +365,7 @@ func (s *Session) toStored() StoredSession {
 		CompactionModel: s.CompactionModel,
 		ContextTokens:   s.ContextTokens,
 		Workdir:         s.Workdir,
+		Host:            s.Host,
 		ActiveSkills:    append([]string(nil), s.activeSkills...),
 		Todos:           append([]agent.Todo(nil), s.todos...),
 		StartedAt:       s.startedAt,
@@ -358,6 +386,7 @@ func sessionFromStored(ss *StoredSession) *Session {
 		CompactionModel: ss.CompactionModel,
 		ContextTokens:   ss.ContextTokens,
 		Workdir:         ss.Workdir,
+		Host:            ss.Host,
 		activeSkills:    ss.ActiveSkills,
 		todos:           ss.Todos,
 		startedAt:       ss.StartedAt,
@@ -380,7 +409,7 @@ func NewManager(store *FileStore) *Manager {
 	return &Manager{sessions: make(map[string]*Session), store: store}
 }
 
-func (m *Manager) Create(goal, model, compactionModel string, contextTokens int, workdir string, cancel context.CancelFunc) *Session {
+func (m *Manager) Create(goal, model, compactionModel string, contextTokens int, workdir, host string, cancel context.CancelFunc) *Session {
 	s := &Session{
 		ID:              newID(),
 		Goal:            goal,
@@ -388,6 +417,7 @@ func (m *Manager) Create(goal, model, compactionModel string, contextTokens int,
 		CompactionModel: compactionModel,
 		ContextTokens:   contextTokens,
 		Workdir:         workdir,
+		Host:            host,
 		startedAt:       time.Now(),
 		status:          "running",
 		cancel:          cancel,
@@ -468,6 +498,7 @@ func (m *Manager) Summaries() []Summary {
 				Goal:         ss.Goal,
 				Model:        ss.Model,
 				Workdir:      ss.Workdir,
+				Host:         ss.Host,
 				StartedAt:    ss.StartedAt,
 				EndedAt:      ss.EndedAt,
 				Status:       ss.Status,

@@ -8,12 +8,15 @@ and an HTTP server that serves a single-page React UI for live tailing.
   Go client (Ollama via its OpenAI-compatible endpoint; swappable to OpenAI /
   Anthropic / etc. by changing one constructor).
 - **Prompt templating:** [tmc/langchaingo](https://github.com/tmc/langchaingo).
-- **UI:** React 18 + Babel standalone, served from a single embedded
-  `index.html` — no `npm install` step.
+- **UI:** React 18 + TypeScript + Tailwind CSS, built with Vite. Compiled
+  output is embedded in the Go binary via `//go:embed` so production stays a
+  single self-contained executable.
 
 ## Prerequisites
 
 - **Go 1.23+** (1.25 used during development).
+- **Node.js 18+** and npm — only needed to build the UI; the Go side compiles
+  without it (against a placeholder UI).
 - **Ollama** installed and running locally: <https://ollama.com/download>.
 - **A model that supports tool calling.** Examples that work:
   - `qwen2.5-coder:7b` (recommended for code tasks)
@@ -31,13 +34,59 @@ and an HTTP server that serves a single-page React UI for live tailing.
 ```
 git clone <this repo>
 cd LocalAgent
-go mod download
-go build -o LocalAgent.exe .       # Windows
-go build -o LocalAgent .           # macOS / Linux
+
+# One-shot: install UI deps, build UI, build Go binary.
+make deps
+make build
 ```
 
-The web UI is embedded in the binary at build time via `//go:embed`, so the
-single executable is fully self-contained.
+`make build` runs `npm run build` in `web/` (producing `web/dist/`) and then
+`go build .` (which embeds that directory). The result is a single binary;
+no extra files need to ship alongside it.
+
+If you don't have Make (Windows without WSL, etc.), the raw two-step is:
+
+```
+cd web && npm install && npm run build
+cd .. && go build .
+```
+
+You can also build only the Go side (`make go`) against whatever's currently
+in `web/dist/`. On a fresh clone that's the committed placeholder page that
+just tells the user to run `make build` — useful for "just check the API
+works" before installing Node.
+
+## Dev workflow
+
+For UI hacking with hot reload:
+
+```
+make dev
+```
+
+This runs `go run . -serve` on `:8080` and `vite` on `:5173` in parallel. The
+Vite proxy forwards `/api/*` (including SSE) to the Go server, so the agent
+loop works at full fidelity while you edit React. Open <http://localhost:5173>.
+
+On Windows without GNU Make, do it manually in two terminals:
+
+```
+# Terminal 1
+go run . -serve
+
+# Terminal 2
+cd web && npm run dev
+```
+
+For production-shape testing (no Vite, served straight from the binary):
+
+```
+make build
+./LocalAgent -serve            # macOS / Linux
+.\LocalAgent.exe -serve        # Windows
+```
+
+Then open <http://localhost:8080>.
 
 ## Run — server + web UI
 
@@ -45,7 +94,8 @@ single executable is fully self-contained.
 ./LocalAgent -serve -addr :8080
 ```
 
-Then open <http://localhost:8080> and fill in the form:
+Then open <http://localhost:8080> and fill in the form. (During development,
+prefer `make dev` and open <http://localhost:5173> instead.)
 
 | Field | Default | Notes |
 |---|---|---|
@@ -319,24 +369,28 @@ loops. You'll only hit it if something is genuinely wrong (the model
 won't call `finish`, won't call tools, etc.). The CLI flag `-max-iter`
 overrides it for advanced use.
 
-## Human-in-the-loop (`ask_user`)
+## Human-in-the-loop (`ask_user`) and mid-run chat
 
-The agent can pause mid-run and ask you a question via the `ask_user` tool.
-This is what makes skills like [WNP-Loop](https://github.com/PaulMDemers/WNP-Loop)
-work — they require the agent to propose a milestone and wait for explicit
-approval before executing.
+There are **two** ways to feed the human's voice into a live run:
 
-**How it looks from the UI:**
+1. **`ask_user` (agent-initiated, blocking)** — the model decides it needs
+   input and calls the `ask_user` tool. The loop pauses. A yellow chat input
+   appears at the bottom of the events panel asking for an answer. Used by
+   skills like [WNP-Loop](https://github.com/PaulMDemers/WNP-Loop) that need
+   explicit "Proceed" approvals per milestone.
+2. **Mid-run inject (user-initiated, non-blocking)** — the chat input is
+   **always visible during a live run**. Type anything any time and press
+   Ctrl/⌘+Enter (or click Send). The message is queued; the agent picks it
+   up at the start of its next iteration as `[User interjected mid-run]:
+   <your text>`. Useful for "actually, also do X" or "you're on the wrong
+   track, look at Y first" — the model sees your guidance without you
+   canceling.
 
-1. The agent calls `ask_user(question: "...", options: [...]?)`.
-2. A yellow question card appears in the timeline. A sticky prompt box
-   slides up at the bottom of the events panel with the question, optional
-   quick-pick buttons (one per `options` entry), and a freeform textarea.
-3. You type an answer (or click an option). Ctrl/⌘+Enter sends.
-4. The agent's tool call unblocks with your answer as the result, and
-   the loop continues.
-5. **Cancel run** while a question is pending also works — the wait
-   returns with `context.Canceled` and the session ends cleanly.
+The same input box handles both. Visual cue: **yellow border** when answering
+a question, **blue border** when injecting freely.
+
+**Cancel run** still works in either mode — pending `ask_user` calls unblock
+with `context.Canceled` and the session ends cleanly.
 
 **For skill authors:** instruct the model to call `ask_user` whenever it
 needs human input. Examples from WNP-Loop:
@@ -364,6 +418,7 @@ what comes next, not for things the agent should figure out itself.
 | `GET`    | `/api/sessions/{id}/events` | **SSE stream.** Replays full history, then tails live. 15 s heartbeats. |
 | `POST`   | `/api/sessions/{id}/cancel` | Cancel a running session. |
 | `POST`   | `/api/sessions/{id}/answer` | Deliver a user answer to a pending `ask_user` question. Body: `{question_id, answer}` → `{ok: true}` on success, 409 if not pending. |
+| `POST`   | `/api/sessions/{id}/inject` | Queue a mid-run user message. Body: `{message}` → `{ok: true}` on success, 409 if the session is already finished. The agent picks up queued messages at the top of its next iteration. |
 | `POST`   | `/api/sessions/{id}/continue` | Run more iterations on a finished session with a follow-up instruction. Body: `{goal, host?, compaction_model?, context_tokens?, skills?: string[], max_iterations?}`. Reuses the session's model + workdir + LLM conversation; compaction + skill settings fall back to the session's saved values if omitted. The existing todo list persists — the agent can add to it or work through the remainder. |
 | `GET`    | `/` | Embedded React UI. |
 
@@ -396,9 +451,34 @@ cat ~/.localagent/sessions/<id>.json | jq
 ```
 .
 ├── main.go                       CLI entry + flag parsing, -serve vs CLI mode
-├── web/
-│   ├── index.html                React single-page UI (CDN React + Babel)
-│   └── embed.go                  //go:embed bridge
+├── Makefile                      `make build` orchestrates UI + Go build
+├── web/                          Vite + React + TypeScript + Tailwind
+│   ├── index.html                Vite entry (minimal)
+│   ├── package.json
+│   ├── vite.config.ts            includes /api proxy for `npm run dev`
+│   ├── tailwind.config.js        custom palette (dark theme)
+│   ├── tsconfig.{json,app,node}.json
+│   ├── postcss.config.js
+│   ├── embed.go                  //go:embed all:dist → fs.Sub(dist)
+│   ├── dist/                     build output, gitignored except placeholder
+│   │   └── index.html            committed stub for `go build` without Node
+│   └── src/
+│       ├── main.tsx              React root
+│       ├── App.tsx               top-level state + orchestration
+│       ├── index.css             Tailwind directives + small @layer rules
+│       ├── types.ts              TS mirrors of Go types
+│       ├── api/client.ts         typed fetch wrappers per endpoint
+│       ├── hooks/
+│       │   ├── useLocalStorage.ts persistent form state
+│       │   └── useSSE.ts         EventSource lifecycle
+│       └── components/
+│           ├── Sidebar.tsx       form + skills + sessions
+│           ├── MainPanel.tsx     header + todos + events + input
+│           ├── SessionList.tsx
+│           ├── SkillsBlock.tsx
+│           ├── TodosPanel.tsx
+│           ├── EventRow.tsx      one case per EventType
+│           └── InputBox.tsx      persistent chat (answer / inject)
 └── internal/
     ├── llm/
     │   ├── client.go             voocel/litellm Ollama wrapper
